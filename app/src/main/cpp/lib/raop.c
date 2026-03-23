@@ -58,12 +58,93 @@ struct raop_conn_s {
 
 	int id;
 	int setup_step;
+	int feedback_count;
+	int request_count;
+	int saw_teardown;
+	int reverse_channel;
+	char apple_session_id[128];
+	char role[32];
+	char last_method[32];
+	char last_url[128];
 };
 typedef struct raop_conn_s raop_conn_t;
 
-#include "raop_handlers.h"
-
 static int g_next_conn_id = 1;
+
+static int is_direct_play_url(const char *url);
+
+static void
+conn_copy_string(char *dst, size_t dstlen, const char *src)
+{
+	if (!dst || dstlen == 0) {
+		return;
+	}
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
+	snprintf(dst, dstlen, "%s", src);
+}
+
+static void
+conn_set_role(raop_conn_t *conn, const char *role)
+{
+	if (!conn || !role || !role[0]) {
+		return;
+	}
+	if (strcmp(conn->role, role)) {
+		conn_copy_string(conn->role, sizeof(conn->role), role);
+	}
+}
+
+static void
+conn_note_session_id(raop_conn_t *conn, const char *session_id)
+{
+	if (!conn || !session_id || !session_id[0]) {
+		return;
+	}
+	if (!conn->apple_session_id[0]) {
+		conn_copy_string(conn->apple_session_id, sizeof(conn->apple_session_id), session_id);
+		return;
+	}
+	if (strcmp(conn->apple_session_id, session_id)) {
+		logger_log(conn->raop->logger, LOGGER_WARNING,
+		           "[RTSP#%d] X-Apple-Session-ID changed %s -> %s",
+		           conn->id,
+		           conn->apple_session_id,
+		           session_id);
+		conn_copy_string(conn->apple_session_id, sizeof(conn->apple_session_id), session_id);
+	}
+}
+
+static void
+conn_note_request(raop_conn_t *conn, const char *method, const char *url, int is_http_airplay)
+{
+	if (!conn || !method || !url) {
+		return;
+	}
+	conn->request_count++;
+	conn_copy_string(conn->last_method, sizeof(conn->last_method), method);
+	conn_copy_string(conn->last_url, sizeof(conn->last_url), url);
+
+	if (!strcmp(url, "/reverse")) {
+		conn_set_role(conn, "reverse");
+	} else if (!strcmp(url, "/feedback")) {
+		conn_set_role(conn, "feedback");
+	} else if (is_direct_play_url(url)) {
+		conn_set_role(conn, "direct-play");
+	} else if (!strcmp(method, "SETUP") || !strcmp(method, "RECORD") ||
+	           !strcmp(method, "GET_PARAMETER") || !strcmp(method, "SET_PARAMETER") ||
+	           !strcmp(method, "FLUSH") || !strcmp(method, "TEARDOWN")) {
+		conn_set_role(conn, "rtsp-control");
+	} else if (is_http_airplay) {
+		conn_set_role(conn, "http-airplay");
+	} else if (!conn->role[0]) {
+		conn_set_role(conn, "rtsp");
+	}
+}
+
+#include "raop_handlers.h"
 
 static int
 is_direct_play_url(const char *url)
@@ -164,10 +245,16 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 	const char *user_agent;
 	const char *session_id;
 	const char *content_location;
+	const char *upgrade_header;
+	const char *connection_header;
+	const char *purpose_header;
 	int datalen = 0;
 	int code = 200;
 	const char *message = "OK";
 	int handled = 0;
+	int is_http_airplay = 0;
+	int is_feedback = 0;
+	const char *protocol = "RTSP/1.0";
 
 	char *response_data = NULL;
 	int response_datalen = 0;
@@ -179,31 +266,72 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 	user_agent = http_request_get_header(request, "User-Agent");
 	session_id = http_request_get_header(request, "X-Apple-Session-ID");
 	content_location = http_request_get_header(request, "Content-Location");
+	upgrade_header = http_request_get_header(request, "Upgrade");
+	connection_header = http_request_get_header(request, "Connection");
+	purpose_header = http_request_get_header(request, "X-Apple-Purpose");
 	http_request_get_data(request, &datalen);
-	if (!method || !cseq) {
+	if (!method || !url) {
+		logger_log(conn->raop->logger, LOGGER_WARNING,
+		           "[RTSP#%d] Request dispatcher got incomplete request method=%s url=%s",
+		           conn->id,
+		           method ? method : "-",
+		           url ? url : "-");
 		return;
 	}
+	is_http_airplay = (cseq == NULL);
+	is_feedback = (!strcmp(method, "POST") && !strcmp(url, "/feedback"));
+	if (is_http_airplay) {
+		protocol = "HTTP/1.1";
+	}
+	conn_note_session_id(conn, session_id);
+	conn_note_request(conn, method, url, is_http_airplay);
 
-	logger_log(conn->raop->logger, LOGGER_INFO,
-	           "[RTSP#%d] %s %s cseq=%s ct=%s bytes=%d session=%s ua=%s",
-	           conn->id,
-	           method,
-	           url ? url : "(null)",
-	           cseq,
-	           content_type ? content_type : "-",
-	           datalen,
-	           session_id ? session_id : "-",
-	           user_agent ? user_agent : "-");
+	if (is_feedback) {
+		conn->feedback_count++;
+		if (conn->feedback_count == 1 || conn->feedback_count % 30 == 0) {
+			logger_log(conn->raop->logger, LOGGER_INFO,
+			           "[RTSP#%d] /feedback keepalive x%d",
+			           conn->id,
+			           conn->feedback_count);
+		}
+	} else {
+		logger_log(conn->raop->logger, LOGGER_INFO,
+		           "[RTSP#%d] %s %s cseq=%s ct=%s bytes=%d session=%s ua=%s",
+		           conn->id,
+		           method,
+		           url ? url : "(null)",
+		           cseq ? cseq : "-",
+		           content_type ? content_type : "-",
+		           datalen,
+		           session_id ? session_id : "-",
+		           user_agent ? user_agent : "-");
+	}
 	if (content_location) {
 		logger_log(conn->raop->logger, LOGGER_INFO,
 		           "[RTSP#%d] Content-Location: %s",
 		           conn->id,
 		           content_location);
 	}
+	if (is_http_airplay && (upgrade_header || purpose_header)) {
+		logger_log(conn->raop->logger, LOGGER_INFO,
+		           "[RTSP#%d] HTTP upgrade=%s connection=%s purpose=%s",
+		           conn->id,
+		           upgrade_header ? upgrade_header : "-",
+		           connection_header ? connection_header : "-",
+		           purpose_header ? purpose_header : "-");
+	}
 
 	raop_handler_t handler = NULL;
 	if (!strcmp(method, "GET") && !strcmp(url, "/info")) {
 		handler = &raop_handler_info;
+	} else if (!strcmp(method, "POST") && !strcmp(url, "/reverse")) {
+		code = 101;
+		message = "Switching Protocols";
+		conn->reverse_channel = 1;
+		logger_log(conn->raop->logger, LOGGER_INFO,
+		           "[RTSP#%d] Reverse event channel established",
+		           conn->id);
+		handled = 1;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/pair-setup")) {
 		handler = &raop_handler_pairsetup;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/pair-verify")) {
@@ -220,6 +348,8 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		handler = &raop_handler_set_parameter;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/feedback")) {
 		handler = &raop_handler_feedback;
+	} else if (!strcmp(method, "POST") && !strcmp(url, "/audioMode")) {
+		handler = &raop_handler_audio_mode;
 	} else if (!strcmp(method, "RECORD")) {
         handler = &raop_handler_record;
 	} else if (is_direct_play_url(url)) {
@@ -247,6 +377,8 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		}
 		handled = 1;
 	} else if (!strcmp(method, "TEARDOWN")) {
+		conn->saw_teardown = 1;
+		conn->setup_step = 0;
 		logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] TEARDOWN received", conn->id);
 		if (conn->raop_rtp) {
 			/* Destroy our RTP session */
@@ -266,9 +398,16 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		handled = 1;
 	}
 
-	*response = http_response_init("RTSP/1.0", code, message);
-	http_response_add_header(*response, "CSeq", cseq);
+	*response = http_response_init(protocol, code, message);
+	if (cseq) {
+		http_response_add_header(*response, "CSeq", cseq);
+	}
 	http_response_add_header(*response, "Server", "AirTunes/220.68");
+	if (code == 101) {
+		http_response_add_header(*response, "Upgrade", "PTTH/1.0");
+		http_response_add_header(*response, "Connection", "Upgrade");
+		http_response_add_header(*response, "Content-Length", "0");
+	}
 	if (!strcmp(method, "TEARDOWN")) {
 		http_response_add_header(*response, "Connection", "close");
 	}
@@ -293,7 +432,28 @@ static void
 conn_destroy(void *ptr)
 {
 	raop_conn_t *conn = ptr;
-	logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Session closed", conn->id);
+	if ((conn->raop_rtp || conn->raop_rtp_mirror) && !conn->saw_teardown) {
+		logger_log(conn->raop->logger, LOGGER_WARNING,
+		           "[RTSP#%d] TCP closed without TEARDOWN; stopping active streams audio=%s mirror=%s role=%s apple-session=%s last=%s %s",
+		           conn->id,
+		           conn->raop_rtp ? "yes" : "no",
+		           conn->raop_rtp_mirror ? "yes" : "no",
+		           conn->role[0] ? conn->role : "-",
+		           conn->apple_session_id[0] ? conn->apple_session_id : "-",
+		           conn->last_method[0] ? conn->last_method : "-",
+		           conn->last_url[0] ? conn->last_url : "-");
+	}
+	logger_log(conn->raop->logger, LOGGER_INFO,
+	           "[RTSP#%d] Session closed role=%s requests=%d feedback=%d reverse=%s teardown=%s apple-session=%s last=%s %s",
+	           conn->id,
+	           conn->role[0] ? conn->role : "-",
+	           conn->request_count,
+	           conn->feedback_count,
+	           conn->reverse_channel ? "yes" : "no",
+	           conn->saw_teardown ? "yes" : "no",
+	           conn->apple_session_id[0] ? conn->apple_session_id : "-",
+	           conn->last_method[0] ? conn->last_method : "-",
+	           conn->last_url[0] ? conn->last_url : "-");
 
 	if (conn->raop_rtp) {
 		/* This is done in case TEARDOWN was not called */
