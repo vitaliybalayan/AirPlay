@@ -17,8 +17,10 @@ import java.util.concurrent.LinkedBlockingQueue;
 public class VideoPlayer extends Thread {
 
     private static final String TAG = "VideoPlayer";
-    private static final long CONFIG_STABILIZE_MS = 700;
-    private static final long MIN_DECODER_RESTART_INTERVAL_MS = 2500;
+    private static final long CONFIG_STABILIZE_MS = 250;
+    private static final long MIN_DECODER_RESTART_INTERVAL_MS = 700;
+    private static final long VIDEO_GAP_RESET_MS = 1500;
+    private static final long VIDEO_PTS_RESET_TOLERANCE_US = 500_000L;
 
     public interface LogListener {
         void onLog(String message);
@@ -52,6 +54,10 @@ public class VideoPlayer extends Thread {
     private long mLastDecoderInitMs = 0L;
     private int mReportedVideoWidth = 0;
     private int mReportedVideoHeight = 0;
+    private boolean mWaitingForSyncFrame = false;
+    private int mDroppedUntilSync = 0;
+    private long mLastVideoPtsUs = Long.MIN_VALUE;
+    private long mLastVideoFrameRealtimeMs = 0L;
 
     public VideoPlayer(Surface surface, LogListener logListener, VideoSizeListener videoSizeListener) {
         mSurface = surface;
@@ -129,10 +135,49 @@ public class VideoPlayer extends Thread {
 
             maybeApplyPendingCodecConfig(false);
 
+            if (mPendingSps != null || mPendingPps != null) {
+                mDroppedBeforeDecoder++;
+                if (mDroppedBeforeDecoder == 1 || mDroppedBeforeDecoder % 30 == 0) {
+                    log("Dropping frame while waiting for stabilized codec config, dropped=" + mDroppedBeforeDecoder + ", pts=" + nalPacket.pts);
+                }
+                continue;
+            }
+
             if (nalPacket.nalType == 0) {
                 handleCodecConfig(nalPacket);
                 continue;
             }
+
+            if (mWaitingForSyncFrame) {
+                if (!containsIdrFrame(nalPacket.nalData)) {
+                    mDroppedUntilSync++;
+                    if (mDroppedUntilSync == 1 || mDroppedUntilSync % 30 == 0) {
+                        log("Dropping frame while waiting for IDR, dropped=" + mDroppedUntilSync + ", pts=" + nalPacket.pts);
+                    }
+                    continue;
+                }
+                log("IDR acquired after config change, dropped=" + mDroppedUntilSync + ", pts=" + nalPacket.pts);
+                mWaitingForSyncFrame = false;
+                mDroppedUntilSync = 0;
+            }
+
+            maybeHandleVideoDiscontinuity(nalPacket);
+
+            if (mWaitingForSyncFrame) {
+                if (!containsIdrFrame(nalPacket.nalData)) {
+                    mDroppedUntilSync++;
+                    if (mDroppedUntilSync == 1 || mDroppedUntilSync % 30 == 0) {
+                        log("Dropping frame after discontinuity while waiting for IDR, dropped=" + mDroppedUntilSync + ", pts=" + nalPacket.pts);
+                    }
+                    continue;
+                }
+                log("IDR acquired after discontinuity, dropped=" + mDroppedUntilSync + ", pts=" + nalPacket.pts);
+                mWaitingForSyncFrame = false;
+                mDroppedUntilSync = 0;
+            }
+
+            mLastVideoPtsUs = nalPacket.pts;
+            mLastVideoFrameRealtimeMs = SystemClock.elapsedRealtime();
 
             if (mDecoder != null) {
                 doDecode(nalPacket);
@@ -190,13 +235,9 @@ public class VideoPlayer extends Thread {
             return;
         }
 
-        if (canKeepCurrentDecoder(parsedWidth, parsedHeight)) {
-            log("Keeping decoder " + mVideoWidth + "x" + mVideoHeight + " for stream " + parsedWidth + "x" + parsedHeight);
-            return;
-        }
-
+        clearQueuedFrames(false);
         queuePendingCodecConfig(newSps, newPps, parsedWidth, parsedHeight);
-        maybeApplyPendingCodecConfig(false);
+        maybeApplyPendingCodecConfig(true);
     }
 
     private void doDecode(NALPacket nalPacket) {
@@ -235,7 +276,7 @@ public class VideoPlayer extends Thread {
                     MediaFormat newFormat = mDecoder.getOutputFormat();
                     int[] size = extractDisplayedSize(newFormat, mVideoWidth, mVideoHeight);
                     notifyVideoSize(size[0], size[1], "output-format");
-                    log("Output format changed: " + newFormat);
+                    log("Output format -> " + size[0] + "x" + size[1]);
                 }
             } while (outputBufferIndex >= 0);
 
@@ -263,12 +304,14 @@ public class VideoPlayer extends Thread {
     }
 
     private void applyCodecConfig(byte[] sps, byte[] pps, int width, int height, String reason) {
+        clearQueuedFrames(false);
         mSps = sps;
         mPps = pps;
         mVideoWidth = width;
         mVideoHeight = height;
         clearPendingCodecConfig();
         initDecoder(reason);
+        waitForSyncFrame(reason);
     }
 
     private void queuePendingCodecConfig(byte[] sps, byte[] pps, int width, int height) {
@@ -316,13 +359,6 @@ public class VideoPlayer extends Thread {
         applyCodecConfig(mPendingSps, mPendingPps, mPendingVideoWidth, mPendingVideoHeight, "stabilized-config");
     }
 
-    private boolean canKeepCurrentDecoder(int width, int height) {
-        if (mDecoder == null) {
-            return false;
-        }
-        return width > 0 && height > 0 && width <= mVideoWidth && height <= mVideoHeight;
-    }
-
     private void notifyVideoSize(int width, int height, String source) {
         if (mVideoSizeListener == null || width <= 0 || height <= 0) {
             return;
@@ -334,6 +370,82 @@ public class VideoPlayer extends Thread {
         mReportedVideoHeight = height;
         mVideoSizeListener.onVideoSizeChanged(width, height);
         log("Video size -> " + width + "x" + height + " source=" + source);
+    }
+
+    private void maybeHandleVideoDiscontinuity(NALPacket nalPacket) {
+        long now = SystemClock.elapsedRealtime();
+
+        if (mDecoder == null || mWaitingForSyncFrame) {
+            return;
+        }
+        if (mLastVideoFrameRealtimeMs > 0 && now - mLastVideoFrameRealtimeMs > VIDEO_GAP_RESET_MS) {
+            clearQueuedFrames(false);
+            flushDecoder("video-gap");
+            waitForSyncFrame("video-gap");
+            return;
+        }
+        if (mLastVideoPtsUs != Long.MIN_VALUE &&
+                nalPacket.pts > 0 &&
+                nalPacket.pts + VIDEO_PTS_RESET_TOLERANCE_US < mLastVideoPtsUs) {
+            clearQueuedFrames(false);
+            flushDecoder("pts-reset");
+            waitForSyncFrame("pts-reset");
+        }
+    }
+
+    private void waitForSyncFrame(String reason) {
+        mWaitingForSyncFrame = true;
+        mDroppedUntilSync = 0;
+        log("Waiting for IDR frame reason=" + reason);
+    }
+
+    private void flushDecoder(String reason) {
+        if (mDecoder == null) {
+            return;
+        }
+        try {
+            mDecoder.flush();
+            mLoggedFirstRenderedFrame = false;
+            mConsecutiveInputUnavailable = 0;
+            log("MediaCodec flushed reason=" + reason);
+        } catch (Exception e) {
+            logError("MediaCodec flush failed (" + reason + ")", e);
+        }
+    }
+
+    private void clearQueuedFrames(boolean keepCodecConfig) {
+        ArrayList<NALPacket> drained = new ArrayList<>();
+        ArrayList<NALPacket> keep = new ArrayList<>();
+
+        mQueue.drainTo(drained);
+        if (drained.isEmpty()) {
+            return;
+        }
+        if (keepCodecConfig) {
+            for (NALPacket packet : drained) {
+                if (packet != null && packet.nalType == 0) {
+                    keep.add(packet);
+                }
+            }
+            for (NALPacket packet : keep) {
+                mQueue.offer(packet);
+            }
+        }
+        log("Cleared queued video frames dropped=" + (drained.size() - keep.size()) + ", keptConfig=" + keep.size());
+    }
+
+    private static boolean containsIdrFrame(byte[] annexB) {
+        List<byte[]> units = splitAnnexB(annexB);
+        for (byte[] unit : units) {
+            if (unit.length == 0) {
+                continue;
+            }
+            int nalType = unit[0] & 0x1F;
+            if (nalType == 5) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static int[] extractDisplayedSize(MediaFormat format, int fallbackWidth, int fallbackHeight) {
@@ -580,6 +692,9 @@ public class VideoPlayer extends Thread {
     public void release() {
         mIsEnd = true;
         clearPendingCodecConfig();
+        clearQueuedFrames(false);
+        mLastVideoPtsUs = Long.MIN_VALUE;
+        mLastVideoFrameRealtimeMs = 0L;
         interrupt();
     }
 }

@@ -104,9 +104,6 @@ create_fdk_aac_decoder(logger_t *logger)
         logger_log(logger, LOGGER_DEBUG, "aacDecoder_GetStreamInfo failed!\n");
         return NULL;
     }
-    logger_log(logger, LOGGER_DEBUG, "> stream info: channel = %d\tsample_rate = %d\tframe_size = %d\taot = %d\tbitrate = %d\n",   \
-            aac_stream_info->channelConfig, aac_stream_info->aacSampleRate,
-           aac_stream_info->aacSamplesPerFrame, aac_stream_info->aot, aac_stream_info->bitRate);
     return phandle;
 }
 

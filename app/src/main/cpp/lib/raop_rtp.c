@@ -429,7 +429,6 @@ static THREAD_RETVAL
 raop_rtp_thread_udp(void *arg)
 {
     raop_rtp_t *raop_rtp = arg;
-    logger_log(raop_rtp->logger, LOGGER_DEBUG, "raop_rtp_thread_udp");
     unsigned char packet[RAOP_PACKET_LEN];
     unsigned int packetlen;
     struct sockaddr_storage saddr;
@@ -478,7 +477,6 @@ raop_rtp_thread_udp(void *arg)
             memcpy(&raop_rtp->control_saddr, &saddr, saddrlen);
             raop_rtp->control_saddr_len = saddrlen;
             int type_c = packet[1] & ~0x80;
-            logger_log(raop_rtp->logger, LOGGER_DEBUG, "raop_rtp_thread_udp type_c 0x%02x, packetlen = %d", type_c, packetlen);
             if (type_c == 0x56) {
                 // 处理重传的包，去除头部4个字节
                 int ret = raop_buffer_queue(raop_rtp->buffer, packet+4, packetlen-4, &raop_rtp->callbacks);
@@ -488,7 +486,7 @@ raop_rtp_thread_udp(void *arg)
                 // TODO: 暂时不处理
 
             } else {
-                logger_log(raop_rtp->logger, LOGGER_DEBUG, "raop_rtp_thread_udp unknown packet");
+                logger_log(raop_rtp->logger, LOGGER_WARNING, "raop_rtp_thread_udp unknown control packet type=0x%02x len=%d", type_c, packetlen);
             }
         }
         if (FD_ISSET(raop_rtp->dsock, &rfds)) {

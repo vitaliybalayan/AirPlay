@@ -65,6 +65,55 @@ raop_stream_type_name(uint64_t type)
 }
 
 static void
+raop_write_plist_response(http_response_t *response,
+                          plist_t root_node,
+                          char **response_data,
+                          int *response_datalen)
+{
+    char *rsp = NULL;
+    uint32_t len = 0;
+
+    if (!root_node || !response_data || !response_datalen) {
+        return;
+    }
+
+    plist_to_bin(root_node, &rsp, &len);
+    if (!rsp || len == 0) {
+        return;
+    }
+
+    http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
+    *response_data = malloc(len);
+    if (!*response_data) {
+        free(rsp);
+        return;
+    }
+    memcpy(*response_data, rsp, len);
+    *response_datalen = (int) len;
+    free(rsp);
+}
+
+static void
+raop_handler_server_info(raop_conn_t *conn,
+                         http_request_t *request, http_response_t *response,
+                         char **response_data, int *response_datalen)
+{
+    plist_t root_node;
+
+    (void)conn;
+    (void)request;
+
+    root_node = plist_new_dict();
+    plist_dict_set_item(root_node, "features", plist_new_uint(0));
+    plist_dict_set_item(root_node, "model", plist_new_string(GLOBAL_MODEL));
+    plist_dict_set_item(root_node, "name", plist_new_string("Android TV"));
+    plist_dict_set_item(root_node, "sourceVersion", plist_new_string("220.68"));
+    plist_dict_set_item(root_node, "statusFlags", plist_new_uint(4));
+
+    raop_write_plist_response(response, root_node, response_data, response_datalen);
+}
+
+static void
 raop_handler_info(raop_conn_t *conn,
 					   http_request_t *request, http_response_t *response,
 					   char **response_data, int *response_datalen)
@@ -358,7 +407,6 @@ raop_handler_setup(raop_conn_t *conn,
         }
         plist_get_data_val(eiv_note, &eiv, &eiv_len);
         memcpy(aesiv, eiv, 16);
-        logger_log(conn->raop->logger, LOGGER_DEBUG, "eiv_len = %llu", eiv_len);
         plist_t ekey_note = plist_dict_get_item(root_node, "ekey");
         char* ekey= NULL;
         uint64_t ekey_len = 0;
@@ -368,7 +416,6 @@ raop_handler_setup(raop_conn_t *conn,
             return;
         }
         plist_get_data_val(ekey_note, &ekey, &ekey_len);
-        logger_log(conn->raop->logger, LOGGER_DEBUG, "ekey_len = %llu", ekey_len);
         // 时间port
 		uint64_t timing_rport;
         plist_t time_note = plist_dict_get_item(root_node, "timingPort");
@@ -378,10 +425,12 @@ raop_handler_setup(raop_conn_t *conn,
             return;
         }
         plist_get_uint_val(time_note, &timing_rport);
-        logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SETUP step=1 timingPort=%llu eiv=%llu ekey=%llu", conn->id, timing_rport, eiv_len, ekey_len);
+        logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SETUP step=1 timingPort=%llu", conn->id, timing_rport);
         // ekey是72字节
         int ret = fairplay_decrypt(conn->fairplay, ekey, aeskey);
-        logger_log(conn->raop->logger, LOGGER_DEBUG, "fairplay_decrypt ret = %d", ret);
+        if (ret != 0) {
+            logger_log(conn->raop->logger, LOGGER_ERR, "[RTSP#%d] fairplay_decrypt failed ret=%d", conn->id, ret);
+        }
 		unsigned char ecdh_secret[32];
         pairing_get_ecdh_secret_key(conn->pairing, ecdh_secret);
         conn->raop_rtp = raop_rtp_init(conn->raop->logger, &conn->raop->callbacks, &conn->remote_saddr, conn->remote_saddrlen, aeskey, aesiv, ecdh_secret, timing_rport);

@@ -72,6 +72,7 @@ typedef struct raop_conn_s raop_conn_t;
 static int g_next_conn_id = 1;
 
 static int is_direct_play_url(const char *url);
+static int url_path_matches(const char *url, const char *path);
 
 static void
 conn_copy_string(char *dst, size_t dstlen, const char *src)
@@ -150,13 +151,121 @@ static int
 is_direct_play_url(const char *url)
 {
 	return url &&
-	       (!strcmp(url, "/play") ||
-	        !strcmp(url, "/scrub") ||
-	        !strcmp(url, "/rate") ||
-	        !strcmp(url, "/stop") ||
-	        !strcmp(url, "/playback-info") ||
-	        !strcmp(url, "/setProperty") ||
-	        !strcmp(url, "/getProperty"));
+	       (url_path_matches(url, "/play") ||
+	        url_path_matches(url, "/scrub") ||
+	        url_path_matches(url, "/rate") ||
+	        url_path_matches(url, "/stop") ||
+	        url_path_matches(url, "/playback-info") ||
+	        url_path_matches(url, "/setProperty") ||
+	        url_path_matches(url, "/getProperty") ||
+	        url_path_matches(url, "/action"));
+}
+
+static int
+url_path_matches(const char *url, const char *path)
+{
+	size_t path_len;
+
+	if (!url || !path) {
+		return 0;
+	}
+	path_len = strlen(path);
+	if (strncmp(url, path, path_len) != 0) {
+		return 0;
+	}
+	return url[path_len] == '\0' || url[path_len] == '?';
+}
+
+static void
+conn_parse_teardown_targets(const char *data, int datalen,
+                            int *stop_audio, int *stop_mirror, int *parsed)
+{
+	plist_t root_node = NULL;
+	plist_t streams_node = NULL;
+	uint32_t stream_count = 0;
+	uint32_t i;
+
+	if (stop_audio) {
+		*stop_audio = 1;
+	}
+	if (stop_mirror) {
+		*stop_mirror = 1;
+	}
+	if (parsed) {
+		*parsed = 0;
+	}
+	if (!data || datalen <= 0) {
+		return;
+	}
+
+	plist_from_bin(data, datalen, &root_node);
+	if (!root_node) {
+		return;
+	}
+
+	streams_node = plist_dict_get_item(root_node, "streams");
+	if (!streams_node) {
+		plist_free(root_node);
+		return;
+	}
+
+	stream_count = plist_array_get_size(streams_node);
+	if (stream_count == 0) {
+		plist_free(root_node);
+		return;
+	}
+
+	if (stop_audio) {
+		*stop_audio = 0;
+	}
+	if (stop_mirror) {
+		*stop_mirror = 0;
+	}
+	if (parsed) {
+		*parsed = 1;
+	}
+
+	for (i = 0; i < stream_count; i++) {
+		plist_t stream_node = plist_array_get_item(streams_node, i);
+		uint64_t stream_type = 0;
+
+		if (!raop_get_stream_type(stream_node, &stream_type)) {
+			continue;
+		}
+		if (stream_type == 96 && stop_audio) {
+			*stop_audio = 1;
+		} else if (stream_type == 110 && stop_mirror) {
+			*stop_mirror = 1;
+		}
+	}
+
+	plist_free(root_node);
+}
+
+static void
+conn_log_teardown_targets(raop_conn_t *conn, int parsed, int stop_audio, int stop_mirror)
+{
+	const char *scope = "all";
+
+	if (parsed) {
+		if (stop_audio && stop_mirror) {
+			scope = "audio+mirror";
+		} else if (stop_audio) {
+			scope = "audio-only";
+		} else if (stop_mirror) {
+			scope = "mirror-only";
+		} else {
+			scope = "none";
+		}
+	}
+
+	logger_log(conn->raop->logger, LOGGER_INFO,
+	           "[RTSP#%d] TEARDOWN targets=%s parsed=%s audio=%s mirror=%s",
+	           conn->id,
+	           scope,
+	           parsed ? "yes" : "no",
+	           stop_audio ? "stop" : "keep",
+	           stop_mirror ? "stop" : "keep");
 }
 
 static void *
@@ -288,7 +397,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 
 	if (is_feedback) {
 		conn->feedback_count++;
-		if (conn->feedback_count == 1 || conn->feedback_count % 30 == 0) {
+		if (conn->feedback_count == 1 || conn->feedback_count % 300 == 0) {
 			logger_log(conn->raop->logger, LOGGER_INFO,
 			           "[RTSP#%d] /feedback keepalive x%d",
 			           conn->id,
@@ -324,6 +433,8 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 	raop_handler_t handler = NULL;
 	if (!strcmp(method, "GET") && !strcmp(url, "/info")) {
 		handler = &raop_handler_info;
+	} else if (!strcmp(method, "GET") && !strcmp(url, "/server-info")) {
+		handler = &raop_handler_server_info;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/reverse")) {
 		code = 101;
 		message = "Switching Protocols";
@@ -377,18 +488,27 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		}
 		handled = 1;
 	} else if (!strcmp(method, "TEARDOWN")) {
+		const char *data;
+		int datalen;
+		int stop_audio = 1;
+		int stop_mirror = 1;
+		int parsed_targets = 0;
+
+		data = http_request_get_data(request, &datalen);
+		conn_parse_teardown_targets(data, datalen, &stop_audio, &stop_mirror, &parsed_targets);
 		conn->saw_teardown = 1;
 		logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] TEARDOWN received", conn->id);
-		if (conn->raop_rtp) {
+		conn_log_teardown_targets(conn, parsed_targets, stop_audio, stop_mirror);
+		if (stop_audio && conn->raop_rtp) {
 			/* Stop active audio transport but keep session keys/state for reuse on the same RTSP connection */
 			raop_rtp_stop(conn->raop_rtp);
 			logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Audio RTP stopped", conn->id);
 		}
-        if (conn->raop_rtp_mirror) {
-            /* Stop active mirror transport but keep session keys/state for reuse on the same RTSP connection */
-            raop_rtp_mirror_stop(conn->raop_rtp_mirror);
-            logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Mirror RTP stopped", conn->id);
-        }
+		if (stop_mirror && conn->raop_rtp_mirror) {
+			/* Stop active mirror transport but keep session keys/state for reuse on the same RTSP connection */
+			raop_rtp_mirror_stop(conn->raop_rtp_mirror);
+			logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Mirror RTP stopped", conn->id);
+		}
 		handled = 1;
 	} else {
 		logger_log(conn->raop->logger, LOGGER_WARNING,

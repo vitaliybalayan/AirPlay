@@ -25,9 +25,15 @@ AirPlay Receiver allows Apple devices (iPhone, iPad, Mac) to discover your TV an
 This project is currently under **active development**. 
 It is being tested primarily on **Philips 65PUD7029/71**. Expect frequent updates and improvements.
 
+### 🐛 Known Bugs (To-Do)
+- [ ] YouTube does not work in AirPlay mode.
+- [ ] Videos from the gallery are not displayed.
+- [ ] Video freezes when mirroring from a Mac.
+- [ ] Audio lags behind video upon the first launch of a TikTok video in AirPlay mode.
+
 ### 🤖 Powered By AI
 This application was actively built and optimized with the help of advanced AI models. Special thanks to:
-- **CodexX**
+- **CodeX**
 - **Opus 4.6**
 - **Gemini 3.1 Pro High**
 
@@ -51,9 +57,15 @@ AirPlay Receiver позволяет устройствам Apple (iPhone, iPad, 
 Проект в данный момент находится на этапе **активной разработки**.
 Тестирование приложения проводится на модели **Philips 65PUD7029/71**.
 
+### 🐛 Известные баги (To-Do)
+- [ ] Не работает YouTube в режиме AirPlay.
+- [ ] Не отображаются видео из галереи.
+- [ ] При работе с Mac видео зависает.
+- [ ] Замечены отставания аудио от видео при первом запуске видео TikTok в режиме AirPlay.
+
 ### 🤖 Создано с помощью нейросетей
 Это приложение было собрано и оптимизировано с помощью передовых моделей искусственного интеллекта. Особая благодарность:
-- **CodexX**
+- **CodeX**
 - **Opus 4.6**
 - **Gemini 3.1 Pro High**
 
