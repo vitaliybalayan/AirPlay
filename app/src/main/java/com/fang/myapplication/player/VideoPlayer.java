@@ -2,6 +2,7 @@ package com.fang.myapplication.player;
 
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
 
@@ -16,6 +17,8 @@ import java.util.concurrent.LinkedBlockingQueue;
 public class VideoPlayer extends Thread {
 
     private static final String TAG = "VideoPlayer";
+    private static final long CONFIG_STABILIZE_MS = 700;
+    private static final long MIN_DECODER_RESTART_INTERVAL_MS = 2500;
 
     public interface LogListener {
         void onLog(String message);
@@ -38,9 +41,17 @@ public class VideoPlayer extends Thread {
     private int mVideoHeight = 720;
     private byte[] mSps = null;
     private byte[] mPps = null;
+    private byte[] mPendingSps = null;
+    private byte[] mPendingPps = null;
+    private int mPendingVideoWidth = 0;
+    private int mPendingVideoHeight = 0;
+    private long mPendingConfigSinceMs = 0L;
     private boolean mLoggedFirstRenderedFrame = false;
     private int mDroppedBeforeDecoder = 0;
     private int mConsecutiveInputUnavailable = 0;
+    private long mLastDecoderInitMs = 0L;
+    private int mReportedVideoWidth = 0;
+    private int mReportedVideoHeight = 0;
 
     public VideoPlayer(Surface surface, LogListener logListener, VideoSizeListener videoSizeListener) {
         mSurface = surface;
@@ -63,7 +74,7 @@ public class VideoPlayer extends Thread {
         }
     }
 
-    private void initDecoder() {
+    private void initDecoder(String reason) {
         if (mSps == null || mPps == null) {
             log("Waiting for SPS/PPS before MediaCodec init");
             return;
@@ -78,13 +89,14 @@ public class VideoPlayer extends Thread {
             mDecoder.configure(format, mSurface, null, 0);
             mDecoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
             mDecoder.start();
+            mLastDecoderInitMs = SystemClock.elapsedRealtime();
             mLoggedFirstRenderedFrame = false;
             mConsecutiveInputUnavailable = 0;
             if (mDroppedBeforeDecoder > 0) {
                 log("Decoder ready after dropping " + mDroppedBeforeDecoder + " frames while waiting for SPS/PPS");
                 mDroppedBeforeDecoder = 0;
             }
-            log("MediaCodec started " + mVideoWidth + "x" + mVideoHeight);
+            log("MediaCodec started " + mVideoWidth + "x" + mVideoHeight + " reason=" + reason);
         } catch (Exception e) {
             mDecoder = null;
             logError("MediaCodec init failed", e);
@@ -114,6 +126,8 @@ public class VideoPlayer extends Thread {
             if (nalPacket == null) {
                 continue;
             }
+
+            maybeApplyPendingCodecConfig(false);
 
             if (nalPacket.nalType == 0) {
                 handleCodecConfig(nalPacket);
@@ -156,22 +170,33 @@ public class VideoPlayer extends Thread {
         }
 
         boolean changed = !Arrays.equals(mSps, newSps) || !Arrays.equals(mPps, newPps);
-        mSps = newSps;
-        mPps = newPps;
-
-        int[] dimensions = parseDimensionsFromSps(mSps);
+        int parsedWidth = mVideoWidth;
+        int parsedHeight = mVideoHeight;
+        int[] dimensions = parseDimensionsFromSps(newSps);
         if (dimensions != null) {
-            mVideoWidth = dimensions[0];
-            mVideoHeight = dimensions[1];
-            if (mVideoSizeListener != null) {
-                mVideoSizeListener.onVideoSizeChanged(mVideoWidth, mVideoHeight);
-            }
+            parsedWidth = dimensions[0];
+            parsedHeight = dimensions[1];
         }
 
-        log("SPS/PPS parsed, size=" + mVideoWidth + "x" + mVideoHeight + ", changed=" + changed);
-        if (mDecoder == null || changed) {
-            initDecoder();
+        log("SPS/PPS parsed, size=" + parsedWidth + "x" + parsedHeight + ", changed=" + changed);
+        notifyVideoSize(parsedWidth, parsedHeight, "codec-config");
+
+        if (mDecoder == null) {
+            applyCodecConfig(newSps, newPps, parsedWidth, parsedHeight, "initial");
+            return;
         }
+
+        if (!changed) {
+            return;
+        }
+
+        if (canKeepCurrentDecoder(parsedWidth, parsedHeight)) {
+            log("Keeping decoder " + mVideoWidth + "x" + mVideoHeight + " for stream " + parsedWidth + "x" + parsedHeight);
+            return;
+        }
+
+        queuePendingCodecConfig(newSps, newPps, parsedWidth, parsedHeight);
+        maybeApplyPendingCodecConfig(false);
     }
 
     private void doDecode(NALPacket nalPacket) {
@@ -208,11 +233,8 @@ public class VideoPlayer extends Thread {
                     }
                 } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     MediaFormat newFormat = mDecoder.getOutputFormat();
-                    int width = newFormat.containsKey(MediaFormat.KEY_WIDTH) ? newFormat.getInteger(MediaFormat.KEY_WIDTH) : mVideoWidth;
-                    int height = newFormat.containsKey(MediaFormat.KEY_HEIGHT) ? newFormat.getInteger(MediaFormat.KEY_HEIGHT) : mVideoHeight;
-                    if (mVideoSizeListener != null && width > 0 && height > 0) {
-                        mVideoSizeListener.onVideoSizeChanged(width, height);
-                    }
+                    int[] size = extractDisplayedSize(newFormat, mVideoWidth, mVideoHeight);
+                    notifyVideoSize(size[0], size[1], "output-format");
                     log("Output format changed: " + newFormat);
                 }
             } while (outputBufferIndex >= 0);
@@ -238,6 +260,94 @@ public class VideoPlayer extends Thread {
         }
         mDecoder = null;
         mConsecutiveInputUnavailable = 0;
+    }
+
+    private void applyCodecConfig(byte[] sps, byte[] pps, int width, int height, String reason) {
+        mSps = sps;
+        mPps = pps;
+        mVideoWidth = width;
+        mVideoHeight = height;
+        clearPendingCodecConfig();
+        initDecoder(reason);
+    }
+
+    private void queuePendingCodecConfig(byte[] sps, byte[] pps, int width, int height) {
+        boolean sameAsPending = Arrays.equals(mPendingSps, sps) &&
+                Arrays.equals(mPendingPps, pps) &&
+                mPendingVideoWidth == width &&
+                mPendingVideoHeight == height;
+        if (sameAsPending) {
+            return;
+        }
+
+        boolean replacingPending = mPendingSps != null;
+        mPendingSps = sps;
+        mPendingPps = pps;
+        mPendingVideoWidth = width;
+        mPendingVideoHeight = height;
+        mPendingConfigSinceMs = SystemClock.elapsedRealtime();
+        log((replacingPending ? "Replacing" : "Queued") +
+                " pending codec config " + width + "x" + height);
+    }
+
+    private void clearPendingCodecConfig() {
+        mPendingSps = null;
+        mPendingPps = null;
+        mPendingVideoWidth = 0;
+        mPendingVideoHeight = 0;
+        mPendingConfigSinceMs = 0L;
+    }
+
+    private void maybeApplyPendingCodecConfig(boolean force) {
+        long now;
+
+        if (mPendingSps == null || mPendingPps == null) {
+            return;
+        }
+        now = SystemClock.elapsedRealtime();
+        if (!force) {
+            if (now - mPendingConfigSinceMs < CONFIG_STABILIZE_MS) {
+                return;
+            }
+            if (mLastDecoderInitMs > 0 && now - mLastDecoderInitMs < MIN_DECODER_RESTART_INTERVAL_MS) {
+                return;
+            }
+        }
+        applyCodecConfig(mPendingSps, mPendingPps, mPendingVideoWidth, mPendingVideoHeight, "stabilized-config");
+    }
+
+    private boolean canKeepCurrentDecoder(int width, int height) {
+        if (mDecoder == null) {
+            return false;
+        }
+        return width > 0 && height > 0 && width <= mVideoWidth && height <= mVideoHeight;
+    }
+
+    private void notifyVideoSize(int width, int height, String source) {
+        if (mVideoSizeListener == null || width <= 0 || height <= 0) {
+            return;
+        }
+        if (mReportedVideoWidth == width && mReportedVideoHeight == height) {
+            return;
+        }
+        mReportedVideoWidth = width;
+        mReportedVideoHeight = height;
+        mVideoSizeListener.onVideoSizeChanged(width, height);
+        log("Video size -> " + width + "x" + height + " source=" + source);
+    }
+
+    private static int[] extractDisplayedSize(MediaFormat format, int fallbackWidth, int fallbackHeight) {
+        int width = format.containsKey(MediaFormat.KEY_WIDTH) ? format.getInteger(MediaFormat.KEY_WIDTH) : fallbackWidth;
+        int height = format.containsKey(MediaFormat.KEY_HEIGHT) ? format.getInteger(MediaFormat.KEY_HEIGHT) : fallbackHeight;
+
+        if (format.containsKey("crop-right") &&
+                format.containsKey("crop-left") &&
+                format.containsKey("crop-bottom") &&
+                format.containsKey("crop-top")) {
+            width = format.getInteger("crop-right") - format.getInteger("crop-left") + 1;
+            height = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1;
+        }
+        return new int[]{width, height};
     }
 
     private static byte[] withStartCode(byte[] nal) {
@@ -469,6 +579,7 @@ public class VideoPlayer extends Thread {
 
     public void release() {
         mIsEnd = true;
+        clearPendingCodecConfig();
         interrupt();
     }
 }
