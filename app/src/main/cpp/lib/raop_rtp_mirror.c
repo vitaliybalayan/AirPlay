@@ -264,7 +264,6 @@ raop_rtp_mirror_thread(void *arg)
             struct sockaddr_storage saddr;
             socklen_t saddrlen;
 
-            logger_log(raop_rtp_mirror->logger, LOGGER_INFO, "Mirror TCP client connecting");
             saddrlen = sizeof(saddr);
             stream_fd = accept(raop_rtp_mirror->mirror_data_sock, (struct sockaddr *)&saddr, &saddrlen);
             if (stream_fd == -1) {

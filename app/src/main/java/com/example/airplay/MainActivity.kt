@@ -42,10 +42,27 @@ class MainActivity : ComponentActivity() {
     private lateinit var multicastLock: WifiManager.MulticastLock
     private val videoWidthState = androidx.compose.runtime.mutableStateOf(0)
     private val videoHeightState = androidx.compose.runtime.mutableStateOf(0)
+    private val isVideoPlayingState = androidx.compose.runtime.mutableStateOf(false)
 
     private val logsList = mutableStateListOf<String>()
 
+    private fun shouldKeepLog(msg: String): Boolean {
+        val noisyFragments = listOf(
+            "raop_rtp_thread_udp",
+            "type_c 0x54",
+            "Connection closed for socket",
+            "eiv_len =",
+            "ekey_len =",
+            "fairplay_decrypt ret =",
+            "> stream info:",
+            "/feedback keepalive",
+            "[Surface] surfaceChanged"
+        )
+        return noisyFragments.none { msg.contains(it) }
+    }
+
     private fun addLog(msg: String) {
+        if (!shouldKeepLog(msg)) return
         runOnUiThread {
             val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
             logsList.add(0, "[$time] $msg")
@@ -98,7 +115,14 @@ class MainActivity : ComponentActivity() {
                 Surface(
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    AirPlayScreen(deviceName, wifiIp, logsList, videoWidthState.value, videoHeightState.value) { surfaceView ->
+                    AirPlayScreen(
+                        deviceName = deviceName,
+                        wifiIp = wifiIp,
+                        logsList = logsList,
+                        videoWidth = videoWidthState.value,
+                        videoHeight = videoHeightState.value,
+                        isVideoPlaying = isVideoPlayingState.value
+                    ) { surfaceView ->
                         if (raopServer == null) {
                             try {
                                 addLog("Creating RaopServer (C++ engine)...")
@@ -112,6 +136,7 @@ class MainActivity : ComponentActivity() {
                                         runOnUiThread {
                                             videoWidthState.value = width
                                             videoHeightState.value = height
+                                            isVideoPlayingState.value = width > 0 && height > 0
                                         }
                                     }
                                 })
@@ -176,6 +201,9 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         airPlayPublisher.stopPublishing()
         raopServer?.stopServer()
+        isVideoPlayingState.value = false
+        videoWidthState.value = 0
+        videoHeightState.value = 0
         if (multicastLock.isHeld) {
             multicastLock.release()
         }
@@ -218,6 +246,7 @@ fun AirPlayScreen(
     logsList: List<String>,
     videoWidth: Int,
     videoHeight: Int,
+    isVideoPlaying: Boolean,
     onSurfaceReady: (SurfaceView) -> Unit
 ) {
     Box(
@@ -226,7 +255,9 @@ fun AirPlayScreen(
             .background(Color.Black)
     ) {
         AndroidView(
-            modifier = Modifier.align(Alignment.Center),
+            modifier = Modifier
+                .fillMaxSize()
+                .align(Alignment.Center),
             factory = { context ->
                 AspectRatioSurfaceView(context).apply {
                     setZOrderMediaOverlay(false)
@@ -238,52 +269,54 @@ fun AirPlayScreen(
             }
         )
 
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(32.dp)
-        ) {
-            Text(
-                text = "AirPlay Приемник",
-                color = Color.White,
-                fontSize = 48.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            Text(
-                text = "$deviceName | $wifiIp",
-                color = Color.Cyan,
-                fontSize = 18.sp,
+        if (!isVideoPlaying) {
+            Column(
                 modifier = Modifier
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-            )
-        }
+                    .align(Alignment.TopStart)
+                    .padding(32.dp)
+            ) {
+                Text(
+                    text = "AirPlay Приемник",
+                    color = Color.White,
+                    fontSize = 48.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                Text(
+                    text = "$deviceName | $wifiIp",
+                    color = Color.Cyan,
+                    fontSize = 18.sp,
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            }
 
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .heightIn(max = 240.dp)
-                .background(Color(0xCC111111))
-                .padding(16.dp)
-        ) {
-            LazyColumn {
-                items(logsList) { logItem ->
-                    val color = when {
-                        logItem.contains("ERR") || logItem.contains("ERROR") || logItem.contains("CRASH") || logItem.contains("FAILED") -> Color.Red
-                        logItem.contains("WRN") || logItem.contains("WARNING") -> Color.Yellow
-                        logItem.contains("READY") || logItem.contains("REACHABLE") || logItem.contains("OK ✓") || logItem.contains("GOT CONNECTION") -> Color.Green
-                        logItem.contains("C++") -> Color(0xFF87CEEB)
-                        logItem.contains("WiFi IP") -> Color(0xFFFFD700)
-                        else -> Color.Green
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+                    .background(Color(0xCC111111))
+                    .padding(16.dp)
+            ) {
+                LazyColumn {
+                    items(logsList) { logItem ->
+                        val color = when {
+                            logItem.contains("ERR") || logItem.contains("ERROR") || logItem.contains("CRASH") || logItem.contains("FAILED") -> Color.Red
+                            logItem.contains("WRN") || logItem.contains("WARNING") -> Color.Yellow
+                            logItem.contains("READY") || logItem.contains("REACHABLE") || logItem.contains("OK ✓") || logItem.contains("GOT CONNECTION") -> Color.Green
+                            logItem.contains("C++") -> Color(0xFF87CEEB)
+                            logItem.contains("WiFi IP") -> Color(0xFFFFD700)
+                            else -> Color.Green
+                        }
+                        Text(
+                            text = logItem,
+                            color = color,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(vertical = 1.dp)
+                        )
                     }
-                    Text(
-                        text = logItem,
-                        color = color,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(vertical = 1.dp)
-                    )
                 }
             }
         }

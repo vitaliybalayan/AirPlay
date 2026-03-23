@@ -109,10 +109,6 @@ public class RaopServer implements SurfaceHolder.Callback {
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-        Log.d(TAG, "surfaceChanged " + width + "x" + height);
-        if (mLogListener != null) {
-            mLogListener.onLog("[Surface] surfaceChanged " + width + "x" + height);
-        }
         if (mVideoPlayer == null) {
             mVideoPlayer = new VideoPlayer(holder.getSurface(), new VideoPlayer.LogListener() {
                 @Override
@@ -140,6 +136,9 @@ public class RaopServer implements SurfaceHolder.Callback {
             mVideoPlayer.release();
             mVideoPlayer = null;
         }
+        if (mVideoSizeListener != null) {
+            mVideoSizeListener.onVideoSizeChanged(0, 0);
+        }
     }
 
     public void startServer() {
@@ -157,6 +156,9 @@ public class RaopServer implements SurfaceHolder.Callback {
         }
         mServerId = 0;
         mAudioPlayer.stopPlay();
+        if (mVideoSizeListener != null) {
+            mVideoSizeListener.onVideoSizeChanged(0, 0);
+        }
     }
 
     public int getPort() {
