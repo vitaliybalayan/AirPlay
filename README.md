@@ -1,6 +1,7 @@
 # 📡 AirPlay Receiver for Android TV / Google TV
 
 <div align="center">
+  <img src="https://img.shields.io/badge/Status-In%20Development-yellow?style=for-the-badge" alt="Status" />
   <img src="https://img.shields.io/badge/Platform-Android%20TV-green?style=for-the-badge&logo=android" alt="Android TV" />
   <img src="https://img.shields.io/badge/Protocol-AirPlay-blue?style=for-the-badge&logo=apple" alt="AirPlay" />
   <img src="https://img.shields.io/badge/C%2B%2B-Native-blueviolet?style=for-the-badge&logo=c%2B%2B" alt="C++ Native" />
@@ -19,6 +20,10 @@
 AirPlay Receiver allows Apple devices (iPhone, iPad, Mac) to discover your TV and stream content seamlessly. By natively implementing the AirPlay/RAOP protocols, it provides smooth and reliable screen mirroring and audio playback capabilities.
 
 **Note:** This application was developed specifically for **Android TV** and **Google TV**, ensuring optimal performance and compatibility on large screens.
+
+### 🛠 Development Status
+This project is currently under **active development**. 
+It is being tested primarily on **Philips 65PUD7029/71**. Expect frequent updates and improvements.
 
 ### 🤖 Powered By AI
 This application was actively built and optimized with the help of advanced AI models. Special thanks to:
@@ -41,6 +46,10 @@ If you find this project helpful and want to support its further development, yo
 AirPlay Receiver позволяет устройствам Apple (iPhone, iPad, Mac) находить ваш телевизор в сети и транслировать контент без задержек. Благодаря нативной реализации (C++) протоколов AirPlay и RAOP, приложение обеспечивает плавное зеркалирование экрана (screen mirroring) и высококачественное воспроизведение звука.
 
 **Внимание:** Это приложение было разработано специально для **Android TV** и **Google TV**, что гарантирует максимальную производительность и удобство использования на больших экранах.
+
+### 🛠 Статус разработки
+Проект в данный момент находится на этапе **активной разработки**.
+Тестирование приложения проводится на модели **Philips 65PUD7029/71**.
 
 ### 🤖 Создано с помощью нейросетей
 Это приложение было собрано и оптимизировано с помощью передовых моделей искусственного интеллекта. Особая благодарность:

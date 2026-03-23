@@ -378,17 +378,16 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		handled = 1;
 	} else if (!strcmp(method, "TEARDOWN")) {
 		conn->saw_teardown = 1;
-		conn->setup_step = 0;
 		logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] TEARDOWN received", conn->id);
 		if (conn->raop_rtp) {
-			/* Destroy our RTP session */
-			raop_rtp_destroy(conn->raop_rtp);
-			conn->raop_rtp = NULL;
+			/* Stop active audio transport but keep session keys/state for reuse on the same RTSP connection */
+			raop_rtp_stop(conn->raop_rtp);
+			logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Audio RTP stopped", conn->id);
 		}
         if (conn->raop_rtp_mirror) {
-            /* Destroy our mirror session */
-            raop_rtp_mirror_destroy(conn->raop_rtp_mirror);
-            conn->raop_rtp_mirror = NULL;
+            /* Stop active mirror transport but keep session keys/state for reuse on the same RTSP connection */
+            raop_rtp_mirror_stop(conn->raop_rtp_mirror);
+            logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Mirror RTP stopped", conn->id);
         }
 		handled = 1;
 	} else {
