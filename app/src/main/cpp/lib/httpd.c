@@ -157,7 +157,7 @@ httpd_accept_connection(httpd_t *httpd, int server_fd, int is_ipv6)
 		return 0;
 	}
 
-	logger_log(httpd->logger, LOGGER_INFO, "Accepted %s client on socket %d",
+	logger_log(httpd->logger, LOGGER_DEBUG, "Accepted %s client on socket %d",
 	           (is_ipv6 ? "IPv6"  : "IPv4"), fd);
 	ret = httpd_add_connection(httpd, fd, &local_saddr, local_saddrlen, &remote_saddr, remote_saddrlen);
 	if (ret == -1) {
@@ -282,7 +282,7 @@ httpd_thread(void *arg)
 
 			ret = recv(connection->socket_fd, buffer, sizeof(buffer), 0);
 			if (ret == 0) {
-				logger_log(httpd->logger, LOGGER_INFO, "Connection closed for socket %d", connection->socket_fd);
+				logger_log(httpd->logger, LOGGER_DEBUG, "Connection closed for socket %d", connection->socket_fd);
 				httpd_remove_connection(httpd, connection);
 				continue;
 			}
@@ -328,7 +328,7 @@ httpd_thread(void *arg)
 						httpd_remove_connection(httpd, connection);
 					}
 				} else {
-					logger_log(httpd->logger, LOGGER_INFO, "Didn't get response");
+					logger_log(httpd->logger, LOGGER_WARNING, "Didn't get response for socket %d", connection->socket_fd);
 				}
 				http_response_destroy(response);
 			} else {
