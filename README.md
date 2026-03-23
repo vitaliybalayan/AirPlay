@@ -40,9 +40,9 @@ This application was actively built and optimized with the help of advanced AI m
 ### ❤️ Support the Author
 If you find this project helpful and want to support its further development, you can make a donation:
 
-[![Donate](https://img.shields.io/badge/Donate-DonationAlerts-FF5E00?style=for-the-badge&logo=donationalerts&logoColor=white)](https://www.donationalerts.com/r/vitaliybalayan)
+[![Donate](https://img.shields.io/badge/Donate-DonationAlerts-FF5E00?style=for-the-badge&logo=donationalerts&logoColor=white)](https://dalink.to/vitaliybalayan)
 
-[🔗 https://www.donationalerts.com/r/vitaliybalayan](https://www.donationalerts.com/r/vitaliybalayan)
+[🔗 https://dalink.to/vitaliybalayan](https://dalink.to/vitaliybalayan)
 
 ---
 
@@ -72,12 +72,12 @@ AirPlay Receiver позволяет устройствам Apple (iPhone, iPad, 
 ### ❤️ Поддержать автора
 Если этот проект оказался для вас полезным и вы хотите поддержать его дальнейшее развитие, вы можете оставить пожертвование:
 
-[![Donate](https://img.shields.io/badge/Донат-DonationAlerts-FF5E00?style=for-the-badge&logo=donationalerts&logoColor=white)](https://www.donationalerts.com/r/vitaliybalayan)
+[![Donate](https://img.shields.io/badge/Донат-DonationAlerts-FF5E00?style=for-the-badge&logo=donationalerts&logoColor=white)](https://dalink.to/vitaliybalayan)
 
-[🔗 https://www.donationalerts.com/r/vitaliybalayan](https://www.donationalerts.com/r/vitaliybalayan)
+[🔗 https://dalink.to/vitaliybalayan](https://dalink.to/vitaliybalayan)
 
 ---
 
 <p align="center">
-  Developed by <a href="https://www.donationalerts.com/r/vitaliybalayan"><b>Vitaliy Balayan</b></a>
+  Developed by <a href="https://dalink.to/vitaliybalayan"><b>Vitaliy Balayan</b></a>
 </p>
