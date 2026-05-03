@@ -17,6 +17,7 @@ static jobject g_RaopServerObj = NULL;  // global ref for log forwarding
 static jmethodID g_onRecvVideoDataM = NULL;
 static jmethodID g_onRecvAudioDataM = NULL;
 static jmethodID g_onAudioVolumeChangedM = NULL;
+static jmethodID g_onVideoStreamStoppedM = NULL;
 
 void OnRecvAudioData(void *observer, pcm_data_struct *data) {
     jobject obj = (jobject) observer;
@@ -115,6 +116,29 @@ video_process(void *cls, h264_decode_struct *data)
     OnRecvVideoData(cls, data);
 }
 
+extern "C" void
+video_stop(void *cls, const char *reason)
+{
+    jobject obj = (jobject) cls;
+    JNIEnv* jniEnv = NULL;
+    int attached = 0;
+    int getEnvStat = g_JavaVM->GetEnv((void **)&jniEnv, JNI_VERSION_1_6);
+    if (getEnvStat == JNI_EDETACHED) {
+        g_JavaVM->AttachCurrentThread(&jniEnv, NULL);
+        attached = 1;
+    }
+    if (jniEnv != NULL && g_onVideoStreamStoppedM != NULL) {
+        jstring jreason = jniEnv->NewStringUTF(reason ? reason : "native-video-stop");
+        if (jreason != NULL) {
+            jniEnv->CallVoidMethod(obj, g_onVideoStreamStoppedM, jreason);
+            jniEnv->DeleteLocalRef(jreason);
+        }
+    }
+    if (attached) {
+        g_JavaVM->DetachCurrentThread();
+    }
+}
+
 // Forward C++ logs to Java for on-screen display
 static void forwardLogToJava(int level, const char *msg) {
     if (g_RaopServerObj == NULL || g_JavaVM == NULL) return;
@@ -184,6 +208,7 @@ Java_com_fang_myapplication_RaopServer_start(JNIEnv* env, jobject object) {
     g_onRecvVideoDataM = env->GetMethodID(cls, "onRecvVideoData", "([BIJJ)V");
     g_onRecvAudioDataM = env->GetMethodID(cls, "onRecvAudioData", "([SJ)V");
     g_onAudioVolumeChangedM = env->GetMethodID(cls, "onAudioVolumeChanged", "(F)V");
+    g_onVideoStreamStoppedM = env->GetMethodID(cls, "onVideoStreamStopped", "(Ljava/lang/String;)V");
     env->DeleteLocalRef(cls);
     
     raop_t *raop;
@@ -193,6 +218,7 @@ Java_com_fang_myapplication_RaopServer_start(JNIEnv* env, jobject object) {
     raop_cbs.audio_process = audio_process;
     raop_cbs.audio_set_volume = audio_set_volume;
     raop_cbs.video_process = video_process;
+    raop_cbs.video_stop = video_stop;
     raop = raop_init(10, &raop_cbs);
     if (raop == NULL) {
         LOGE("raop = NULL");

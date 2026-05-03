@@ -239,7 +239,7 @@ public class VideoPlayer extends Thread {
         notifyVideoSize(parsedWidth, parsedHeight, "codec-config");
 
         if (mDecoder == null) {
-            applyCodecConfig(newSps, newPps, parsedWidth, parsedHeight, "initial");
+            applyCodecConfig(newSps, newPps, parsedWidth, parsedHeight, "initial", false, false);
             return;
         }
 
@@ -346,15 +346,19 @@ public class VideoPlayer extends Thread {
         mConsecutiveInputUnavailable = 0;
     }
 
-    private void applyCodecConfig(byte[] sps, byte[] pps, int width, int height, String reason) {
-        clearQueuedFrames(false);
+    private void applyCodecConfig(byte[] sps, byte[] pps, int width, int height, String reason, boolean clearQueuedFrames, boolean waitForIdr) {
+        if (clearQueuedFrames) {
+            clearQueuedFrames(false);
+        }
         mSps = sps;
         mPps = pps;
         mVideoWidth = width;
         mVideoHeight = height;
         clearPendingCodecConfig();
         initDecoder(reason);
-        waitForSyncFrame(reason);
+        if (waitForIdr) {
+            waitForSyncFrame(reason);
+        }
     }
 
     private void queuePendingCodecConfig(byte[] sps, byte[] pps, int width, int height) {
@@ -399,7 +403,7 @@ public class VideoPlayer extends Thread {
                 return;
             }
         }
-        applyCodecConfig(mPendingSps, mPendingPps, mPendingVideoWidth, mPendingVideoHeight, "stabilized-config");
+        applyCodecConfig(mPendingSps, mPendingPps, mPendingVideoWidth, mPendingVideoHeight, "stabilized-config", true, true);
     }
 
     private void notifyVideoSize(int width, int height, String source) {
@@ -749,5 +753,17 @@ public class VideoPlayer extends Thread {
         mLastVideoPtsUs = Long.MIN_VALUE;
         mLastVideoFrameRealtimeMs = 0L;
         interrupt();
+    }
+
+    public void releaseAndWait(long timeoutMs) {
+        release();
+        if (Thread.currentThread() == this) {
+            return;
+        }
+        try {
+            join(timeoutMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

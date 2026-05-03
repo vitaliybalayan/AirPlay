@@ -1,5 +1,8 @@
 package com.fang.myapplication;
 
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -16,13 +19,42 @@ public class RaopServer implements SurfaceHolder.Callback {
         System.loadLibrary("play-lib");
     }
     private static final String TAG = "RaopServer";
+    private static final long VIDEO_STREAM_IDLE_LOG_MS = 5000L;
+    private static final long VIDEO_WATCHDOG_INTERVAL_MS = 1000L;
+    private static final long VIDEO_PLAYER_RELEASE_TIMEOUT_MS = 1500L;
+
     private VideoPlayer mVideoPlayer;
     private AudioPlayer mAudioPlayer;
     private SurfaceView mSurfaceView;
+    private SurfaceHolder mSurfaceHolder;
+    private final Handler mMainHandler = new Handler(Looper.getMainLooper());
     private long mServerId = 0;
     private boolean mLoggedVideoConfig = false;
     private boolean mLoggedFirstVideoFrame = false;
     private boolean mLoggedFirstAudioPacket = false;
+    private volatile long mLastVideoPacketRealtimeMs = 0L;
+    private volatile boolean mVideoStreamActive = false;
+    private volatile boolean mLoggedVideoIdle = false;
+    private volatile boolean mReleased = false;
+
+    private final Runnable mVideoWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (mReleased) {
+                return;
+            }
+            long lastVideoPacket = mLastVideoPacketRealtimeMs;
+            long idleMs = lastVideoPacket > 0 ? SystemClock.elapsedRealtime() - lastVideoPacket : 0L;
+            if (mVideoStreamActive && lastVideoPacket > 0 && idleMs > VIDEO_STREAM_IDLE_LOG_MS && !mLoggedVideoIdle) {
+                mLoggedVideoIdle = true;
+                Log.i(TAG, "Video stream idle: idleMs=" + idleMs + ", preserving current output until native stop");
+                if (mLogListener != null) {
+                    mLogListener.onLog("[Video] Stream idle, waiting for native stop");
+                }
+            }
+            mMainHandler.postDelayed(this, VIDEO_WATCHDOG_INTERVAL_MS);
+        }
+    };
     
     // Listener for forwarding C++ logs to Kotlin UI
     public interface LogListener {
@@ -42,6 +74,7 @@ public class RaopServer implements SurfaceHolder.Callback {
         mAudioPlayer = new AudioPlayer();
         mAudioPlayer.start();
         Log.i(TAG, "constructor: AudioPlayer started");
+        mMainHandler.postDelayed(mVideoWatchdog, VIDEO_WATCHDOG_INTERVAL_MS);
     }
     
     public void setLogListener(LogListener listener) {
@@ -76,6 +109,10 @@ public class RaopServer implements SurfaceHolder.Callback {
     }
 
     public void onRecvVideoData(byte[] nal, int nalType, long dts, long pts) {
+        mLastVideoPacketRealtimeMs = SystemClock.elapsedRealtime();
+        mVideoStreamActive = true;
+        mLoggedVideoIdle = false;
+        ensureVideoPlayer();
         if (nalType == 0 && !mLoggedVideoConfig) {
             Log.i(TAG, "onRecvVideoData: first SPS/PPS bytes=" + nal.length + " pts=" + pts);
         } else if (nalType != 0 && !mLoggedFirstVideoFrame) {
@@ -121,9 +158,23 @@ public class RaopServer implements SurfaceHolder.Callback {
         }
     }
 
+    public void onVideoStreamStopped(String reason) {
+        Log.i(TAG, "onVideoStreamStopped: reason=" + reason);
+        if (mLogListener != null) {
+            mLogListener.onLog("[Video] Native stream stopped: " + reason);
+        }
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                resetVideoOutput(reason != null ? reason : "native-video-stop");
+            }
+        });
+    }
+
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i(TAG, "surfaceCreated");
+        mSurfaceHolder = holder;
         if (mLogListener != null) {
             mLogListener.onLog("[Surface] surfaceCreated");
         }
@@ -132,38 +183,15 @@ public class RaopServer implements SurfaceHolder.Callback {
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         Log.i(TAG, "surfaceChanged: format=" + format + " size=" + width + "x" + height);
-        if (mVideoPlayer == null) {
-            Log.i(TAG, "surfaceChanged: creating VideoPlayer");
-            mVideoPlayer = new VideoPlayer(holder.getSurface(), new VideoPlayer.LogListener() {
-                @Override
-                public void onLog(String message) {
-                    if (mLogListener != null) {
-                        mLogListener.onLog(message);
-                    }
-                }
-            }, new VideoPlayer.VideoSizeListener() {
-                @Override
-                public void onVideoSizeChanged(int width, int height) {
-                    if (mVideoSizeListener != null) {
-                        mVideoSizeListener.onVideoSizeChanged(width, height);
-                    }
-                }
-            });
-            mVideoPlayer.start();
-            Log.i(TAG, "surfaceChanged: VideoPlayer started");
-        }
+        mSurfaceHolder = holder;
+        ensureVideoPlayer();
     }
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
         Log.i(TAG, "surfaceDestroyed");
-        if (mVideoPlayer != null) {
-            mVideoPlayer.release();
-            mVideoPlayer = null;
-        }
-        if (mVideoSizeListener != null) {
-            mVideoSizeListener.onVideoSizeChanged(0, 0);
-        }
+        mSurfaceHolder = null;
+        resetVideoOutput("surface-destroyed");
     }
 
     public void startServer() {
@@ -181,12 +209,58 @@ public class RaopServer implements SurfaceHolder.Callback {
 
     public void stopServer() {
         Log.i(TAG, "stopServer: serverId=" + mServerId);
+        mReleased = true;
+        mMainHandler.removeCallbacks(mVideoWatchdog);
         if (mServerId != 0) {
             stop(mServerId);
         }
         mServerId = 0;
+        resetVideoOutput("server-stop");
         mAudioPlayer.stopPlay();
         Log.i(TAG, "stopServer: AudioPlayer stopped");
+    }
+
+    private void ensureVideoPlayer() {
+        if (mVideoPlayer != null) {
+            return;
+        }
+        SurfaceHolder holder = mSurfaceHolder != null ? mSurfaceHolder : mSurfaceView.getHolder();
+        if (holder == null || holder.getSurface() == null || !holder.getSurface().isValid()) {
+            Log.w(TAG, "ensureVideoPlayer: surface is not ready");
+            return;
+        }
+
+        Log.i(TAG, "ensureVideoPlayer: creating VideoPlayer");
+        mVideoPlayer = new VideoPlayer(holder.getSurface(), new VideoPlayer.LogListener() {
+            @Override
+            public void onLog(String message) {
+                if (mLogListener != null) {
+                    mLogListener.onLog(message);
+                }
+            }
+        }, new VideoPlayer.VideoSizeListener() {
+            @Override
+            public void onVideoSizeChanged(int width, int height) {
+                if (mVideoSizeListener != null) {
+                    mVideoSizeListener.onVideoSizeChanged(width, height);
+                }
+            }
+        });
+        mVideoPlayer.start();
+        Log.i(TAG, "ensureVideoPlayer: VideoPlayer started");
+    }
+
+    private void resetVideoOutput(String reason) {
+        Log.i(TAG, "resetVideoOutput: reason=" + reason);
+        mVideoStreamActive = false;
+        mLastVideoPacketRealtimeMs = 0L;
+        mLoggedVideoIdle = false;
+        mLoggedVideoConfig = false;
+        mLoggedFirstVideoFrame = false;
+        if (mVideoPlayer != null) {
+            mVideoPlayer.releaseAndWait(VIDEO_PLAYER_RELEASE_TIMEOUT_MS);
+            mVideoPlayer = null;
+        }
         if (mVideoSizeListener != null) {
             mVideoSizeListener.onVideoSizeChanged(0, 0);
         }
