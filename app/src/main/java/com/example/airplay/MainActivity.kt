@@ -11,13 +11,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -28,10 +26,6 @@ import androidx.tv.material3.Text
 import com.example.airplay.ui.theme.AirPlayTheme
 import java.net.Inet4Address
 import java.net.NetworkInterface
-import java.net.ServerSocket
-import java.net.Socket
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 import com.fang.myapplication.RaopServer
@@ -50,33 +44,8 @@ class MainActivity : ComponentActivity() {
     private val videoHeightState = androidx.compose.runtime.mutableStateOf(0)
     private val isVideoPlayingState = androidx.compose.runtime.mutableStateOf(false)
 
-    private val logsList = mutableStateListOf<String>()
-
-    private fun shouldKeepLog(msg: String): Boolean {
-        val noisyFragments = listOf(
-            "raop_rtp_thread_udp",
-            "type_c 0x54",
-            "Connection closed for socket",
-            "eiv_len =",
-            "ekey_len =",
-            "fairplay_decrypt ret =",
-            "> stream info:",
-            "/feedback keepalive",
-            "[Surface] surfaceChanged"
-        )
-        return noisyFragments.none { msg.contains(it) }
-    }
-
     private fun addLog(msg: String) {
         Log.i(TAG, msg)
-        if (!shouldKeepLog(msg)) return
-        runOnUiThread {
-            val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            logsList.add(0, "[$time] $msg")
-            while (logsList.size > 200) {
-                logsList.removeAt(logsList.lastIndex)
-            }
-        }
     }
 
     private fun getWifiIpAddress(): String {
@@ -125,8 +94,6 @@ class MainActivity : ComponentActivity() {
                 ) {
                     AirPlayScreen(
                         deviceName = deviceName,
-                        wifiIp = wifiIp,
-                        logsList = logsList,
                         videoWidth = videoWidthState.value,
                         videoHeight = videoHeightState.value,
                         isVideoPlaying = isVideoPlayingState.value
@@ -160,37 +127,6 @@ class MainActivity : ComponentActivity() {
                                 addLog("PK: ${pk.take(16)}...")
 
                                 if (raopPort > 0) {
-                                    // Тест TCP подключения к localhost
-                                    Thread {
-                                        try {
-                                            val testSock = Socket("127.0.0.1", raopPort)
-                                            Log.i(TAG, "TCP localhost test OK: port=$raopPort")
-                                            addLog("TCP localhost test: port $raopPort OK ✓")
-                                            testSock.close()
-                                        } catch (e: Exception) {
-                                            Log.w(TAG, "TCP localhost test failed: port=$raopPort", e)
-                                            addLog("TCP localhost test FAILED: ${e.message}")
-                                        }
-                                    }.start()
-                                    
-                                    // Открываем дополнительный простой TCP сервер 
-                                    // для проверки доступности по сети
-                                    Thread {
-                                        try {
-                                            val testServer = ServerSocket(7000)
-                                            Log.i(TAG, "Debug TCP test server listening on port 7000")
-                                            addLog("Test server on port 7000 listening...")
-                                            val client = testServer.accept()
-                                            Log.i(TAG, "Debug TCP test server got connection from ${client.inetAddress}")
-                                            addLog("*** GOT CONNECTION on port 7000 from ${client.inetAddress} ***")
-                                            client.close()
-                                            testServer.close()
-                                        } catch (e: Exception) {
-                                            Log.w(TAG, "Debug TCP test server failed", e)
-                                            addLog("Test server 7000: ${e.message}")
-                                        }
-                                    }.start()
-
                                     addLog("Publishing mDNS (NsdManager)...")
                                     airPlayPublisher.startPublishing(deviceName, macAddress, raopPort, raopPort, pk)
                                     addLog("=== READY! Waiting for iPhone ===")
@@ -262,17 +198,36 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AirPlayScreen(
     deviceName: String,
-    wifiIp: String,
-    logsList: List<String>,
     videoWidth: Int,
     videoHeight: Int,
     isVideoPlaying: Boolean,
     onSurfaceReady: (SurfaceView) -> Unit
 ) {
+    val isRussian = Locale.getDefault().language == "ru"
+    val copy = if (isRussian) {
+        IdleCopy(
+            title = "AirPlay",
+            subtitle = "Готов к трансляции",
+            status = "Ожидание устройства",
+            stepOne = "Откройте Пункт управления на iPhone, iPad или Mac.",
+            stepTwo = "Нажмите «Повтор экрана» или AirPlay.",
+            stepThree = "Выберите «$deviceName»."
+        )
+    } else {
+        IdleCopy(
+            title = "AirPlay",
+            subtitle = "Ready to stream",
+            status = "Waiting for device",
+            stepOne = "Open Control Center on your iPhone, iPad, or Mac.",
+            stepTwo = "Tap Screen Mirroring or AirPlay.",
+            stepThree = "Choose \"$deviceName\"."
+        )
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Color(0xFF06080B))
     ) {
         AndroidView(
             modifier = Modifier
@@ -300,54 +255,98 @@ fun AirPlayScreen(
         if (!isVideoPlaying) {
             Column(
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(32.dp)
+                    .align(Alignment.Center)
+                    .fillMaxWidth()
+                    .padding(horizontal = 64.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = "AirPlay Приемник",
+                    text = copy.title,
                     color = Color.White,
-                    fontSize = 48.sp,
+                    fontSize = 64.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(bottom = 8.dp)
+                    textAlign = TextAlign.Center
                 )
+                Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    text = "$deviceName | $wifiIp",
-                    color = Color.Cyan,
-                    fontSize = 18.sp,
-                    modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.45f))
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                    text = copy.subtitle,
+                    color = Color(0xFFB9C7D6),
+                    fontSize = 24.sp,
+                    textAlign = TextAlign.Center
                 )
+                Spacer(modifier = Modifier.height(28.dp))
+                StatusLine(text = copy.status)
+                Spacer(modifier = Modifier.height(44.dp))
+                InstructionLine(number = "1", text = copy.stepOne)
+                Spacer(modifier = Modifier.height(14.dp))
+                InstructionLine(number = "2", text = copy.stepTwo)
+                Spacer(modifier = Modifier.height(14.dp))
+                InstructionLine(number = "3", text = copy.stepThree)
             }
 
-            Box(
+            Text(
+                text = "© vitaliybalayan",
+                color = Color(0xFF46515F),
+                fontSize = 14.sp,
                 modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .heightIn(max = 240.dp)
-                    .background(Color(0xCC111111))
-                    .padding(16.dp)
-            ) {
-                LazyColumn {
-                    items(logsList) { logItem ->
-                        val color = when {
-                            logItem.contains("ERR") || logItem.contains("ERROR") || logItem.contains("CRASH") || logItem.contains("FAILED") -> Color.Red
-                            logItem.contains("WRN") || logItem.contains("WARNING") -> Color.Yellow
-                            logItem.contains("READY") || logItem.contains("REACHABLE") || logItem.contains("OK ✓") || logItem.contains("GOT CONNECTION") -> Color.Green
-                            logItem.contains("C++") -> Color(0xFF87CEEB)
-                            logItem.contains("WiFi IP") -> Color(0xFFFFD700)
-                            else -> Color.Green
-                        }
-                        Text(
-                            text = logItem,
-                            color = color,
-                            fontSize = 12.sp,
-                            modifier = Modifier.padding(vertical = 1.dp)
-                        )
-                    }
-                }
-            }
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 28.dp),
+                textAlign = TextAlign.Center
+            )
         }
+    }
+}
+
+private data class IdleCopy(
+    val title: String,
+    val subtitle: String,
+    val status: String,
+    val stepOne: String,
+    val stepTwo: String,
+    val stepThree: String
+)
+
+@Composable
+private fun StatusLine(text: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(9.dp)
+                .background(Color(0xFF37D67A))
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = text.uppercase(Locale.getDefault()),
+            color = Color(0xFF7EE2A8),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun InstructionLine(number: String, text: String) {
+    Row(
+        modifier = Modifier.widthIn(max = 760.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = number,
+            color = Color(0xFF7AA7FF),
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(34.dp),
+            textAlign = TextAlign.Center
+        )
+        Text(
+            text = text,
+            color = Color(0xFFE7EDF5),
+            fontSize = 21.sp,
+            lineHeight = 29.sp
+        )
     }
 }
 
