@@ -268,6 +268,19 @@ conn_log_teardown_targets(raop_conn_t *conn, int parsed, int stop_audio, int sto
 	           stop_mirror ? "stop" : "keep");
 }
 
+static void
+conn_notify_video_stopped(raop_conn_t *conn, const char *reason)
+{
+	if (!conn || !conn->raop || !conn->raop->callbacks.video_stop) {
+		return;
+	}
+	logger_log(conn->raop->logger, LOGGER_INFO,
+	           "[RTSP#%d] Notify video stop reason=%s",
+	           conn->id,
+	           reason ? reason : "-");
+	conn->raop->callbacks.video_stop(conn->raop->callbacks.cls, reason ? reason : "native-video-stop");
+}
+
 static void *
 conn_init(void *opaque,
           const struct sockaddr_storage *local_saddr,
@@ -508,6 +521,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 			/* Stop active mirror transport but keep session keys/state for reuse on the same RTSP connection */
 			raop_rtp_mirror_stop(conn->raop_rtp_mirror);
 			logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Mirror RTP stopped", conn->id);
+			conn_notify_video_stopped(conn, "teardown-mirror");
 		}
 		handled = 1;
 	} else {
@@ -580,6 +594,9 @@ conn_destroy(void *ptr)
 	}
     if (conn->raop_rtp_mirror) {
         /* This is done in case TEARDOWN was not called */
+		if (!conn->saw_teardown) {
+			conn_notify_video_stopped(conn, "session-closed");
+		}
         raop_rtp_mirror_destroy(conn->raop_rtp_mirror);
     }
 	pairing_session_destroy(conn->pairing);

@@ -36,6 +36,8 @@ import java.util.Locale
 
 import com.fang.myapplication.RaopServer
 
+private const val VIDEO_DIM_ALPHA = 0.18f
+
 class MainActivity : ComponentActivity() {
     private companion object {
         const val TAG = "AirPlayMain"
@@ -286,6 +288,14 @@ fun AirPlayScreen(
                 view.setVideoSize(videoWidth, videoHeight)
             }
         )
+
+        if (isVideoPlaying) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(Color.Black.copy(alpha = VIDEO_DIM_ALPHA))
+            )
+        }
 
         if (!isVideoPlaying) {
             Column(
