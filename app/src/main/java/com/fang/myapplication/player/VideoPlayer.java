@@ -2,6 +2,7 @@ package com.fang.myapplication.player;
 
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
@@ -36,7 +37,7 @@ public class VideoPlayer extends Thread {
     private final LogListener mLogListener;
     private final VideoSizeListener mVideoSizeListener;
     private volatile boolean mIsEnd = false;
-    private final LinkedBlockingQueue<NALPacket> mQueue = new LinkedBlockingQueue<>(300);
+    private final LinkedBlockingQueue<NALPacket> mQueue = new LinkedBlockingQueue<>(900);
 
     private MediaCodec mDecoder = null;
     private int mVideoWidth = 1280;
@@ -91,6 +92,11 @@ public class VideoPlayer extends Thread {
             format.setByteBuffer("csd-0", ByteBuffer.wrap(withStartCode(mSps)));
             format.setByteBuffer("csd-1", ByteBuffer.wrap(withStartCode(mPps)));
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Math.max(mVideoWidth * mVideoHeight, 1024 * 1024));
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);
+                format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO);
+                format.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED);
+            }
             mDecoder = MediaCodec.createDecoderByType(mMimeType);
             mDecoder.configure(format, mSurface, null, 0);
             mDecoder.setVideoScalingMode(MediaCodec.VIDEO_SCALING_MODE_SCALE_TO_FIT);
@@ -102,7 +108,7 @@ public class VideoPlayer extends Thread {
                 log("Decoder ready after dropping " + mDroppedBeforeDecoder + " frames while waiting for SPS/PPS");
                 mDroppedBeforeDecoder = 0;
             }
-            log("MediaCodec started " + mVideoWidth + "x" + mVideoHeight + " reason=" + reason);
+            log("MediaCodec started " + mVideoWidth + "x" + mVideoHeight + " reason=" + reason + ", color=bt709/limited-range");
         } catch (Exception e) {
             mDecoder = null;
             logError("MediaCodec init failed", e);
@@ -112,7 +118,13 @@ public class VideoPlayer extends Thread {
     public void addPacker(NALPacket nalPacket) {
         if (mIsEnd) return;
         if (!mQueue.offer(nalPacket)) {
-            Log.w(TAG, "Video queue full, dropping frame! pts=" + nalPacket.pts);
+            if (nalPacket.nalType == 0 || containsIdrFrame(nalPacket.nalData)) {
+                clearQueuedFrames(nalPacket.nalType == 0);
+                mQueue.offer(nalPacket);
+                log("Video queue full, kept fresh sync/config frame pts=" + nalPacket.pts);
+            } else {
+                Log.w(TAG, "Video queue full, dropping non-sync frame pts=" + nalPacket.pts);
+            }
         }
     }
 
@@ -241,10 +253,31 @@ public class VideoPlayer extends Thread {
     }
 
     private void doDecode(NALPacket nalPacket) {
-        final int TIMEOUT_USEC = 10000;
+        final int INPUT_TIMEOUT_USEC = 20000;
+        final long MAX_INPUT_WAIT_MS = 250;
 
         try {
-            int inputBufIndex = mDecoder.dequeueInputBuffer(TIMEOUT_USEC);
+            drainOutputBuffers(1000);
+
+            int inputBufIndex = -1;
+            long waitStartedMs = SystemClock.elapsedRealtime();
+            while (!mIsEnd && inputBufIndex < 0) {
+                inputBufIndex = mDecoder.dequeueInputBuffer(INPUT_TIMEOUT_USEC);
+                if (inputBufIndex < 0) {
+                    mConsecutiveInputUnavailable++;
+                    drainOutputBuffers(1000);
+                    if (mConsecutiveInputUnavailable == 10 || mConsecutiveInputUnavailable % 120 == 0) {
+                        log("Input buffer unavailable, consecutive=" + mConsecutiveInputUnavailable + ", queue=" + mQueue.size() + ", pts=" + nalPacket.pts);
+                    }
+                    if (SystemClock.elapsedRealtime() - waitStartedMs > MAX_INPUT_WAIT_MS) {
+                        log("Input buffer stalled, flushing decoder to avoid frame loss pts=" + nalPacket.pts);
+                        flushDecoder("input-stall");
+                        waitForSyncFrame("input-stall");
+                        return;
+                    }
+                }
+            }
+
             if (inputBufIndex >= 0) {
                 if (mConsecutiveInputUnavailable >= 10) {
                     log("Input buffer recovered after " + mConsecutiveInputUnavailable + " unavailable polls");
@@ -252,37 +285,47 @@ public class VideoPlayer extends Thread {
                 mConsecutiveInputUnavailable = 0;
                 ByteBuffer inputBuf = mDecoder.getInputBuffer(inputBufIndex);
                 if (inputBuf != null) {
+                    if (nalPacket.nalData.length > inputBuf.capacity()) {
+                        log("Frame too large for input buffer, bytes=" + nalPacket.nalData.length + ", capacity=" + inputBuf.capacity());
+                        mDecoder.queueInputBuffer(inputBufIndex, 0, 0, nalPacket.pts, 0);
+                        waitForSyncFrame("oversized-frame");
+                        return;
+                    }
                     inputBuf.clear();
                     inputBuf.put(nalPacket.nalData);
                     mDecoder.queueInputBuffer(inputBufIndex, 0, nalPacket.nalData.length, nalPacket.pts, 0);
                 }
-            } else {
-                mConsecutiveInputUnavailable++;
-                if (mConsecutiveInputUnavailable == 10 || mConsecutiveInputUnavailable % 120 == 0) {
-                    log("Input buffer unavailable, consecutive=" + mConsecutiveInputUnavailable + ", pts=" + nalPacket.pts);
-                }
             }
 
-            int outputBufferIndex;
-            do {
-                outputBufferIndex = mDecoder.dequeueOutputBuffer(mBufferInfo, 1000);
-                if (outputBufferIndex >= 0) {
-                    mDecoder.releaseOutputBuffer(outputBufferIndex, true);
-                    if (!mLoggedFirstRenderedFrame) {
-                        mLoggedFirstRenderedFrame = true;
-                        log("First frame rendered, pts=" + mBufferInfo.presentationTimeUs);
-                    }
-                } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    MediaFormat newFormat = mDecoder.getOutputFormat();
-                    int[] size = extractDisplayedSize(newFormat, mVideoWidth, mVideoHeight);
-                    notifyVideoSize(size[0], size[1], "output-format");
-                    log("Output format -> " + size[0] + "x" + size[1]);
-                }
-            } while (outputBufferIndex >= 0);
+            drainOutputBuffers(1000);
 
         } catch (Exception e) {
             logError("Exception in doDecode", e);
         }
+    }
+
+    private void drainOutputBuffers(int timeoutUsec) {
+        if (mDecoder == null) {
+            return;
+        }
+
+        int outputBufferIndex;
+        do {
+            outputBufferIndex = mDecoder.dequeueOutputBuffer(mBufferInfo, timeoutUsec);
+            if (outputBufferIndex >= 0) {
+                mDecoder.releaseOutputBuffer(outputBufferIndex, true);
+                if (!mLoggedFirstRenderedFrame) {
+                    mLoggedFirstRenderedFrame = true;
+                    log("First frame rendered, pts=" + mBufferInfo.presentationTimeUs);
+                }
+            } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                MediaFormat newFormat = mDecoder.getOutputFormat();
+                int[] size = extractDisplayedSize(newFormat, mVideoWidth, mVideoHeight);
+                notifyVideoSize(size[0], size[1], "output-format");
+                log("Output format -> " + size[0] + "x" + size[1] + ", " + describeColor(newFormat));
+            }
+            timeoutUsec = 0;
+        } while (outputBufferIndex >= 0);
     }
 
     private void releaseDecoder() {
@@ -457,6 +500,19 @@ public class VideoPlayer extends Thread {
             height = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1;
         }
         return new int[]{width, height};
+    }
+
+    private static String describeColor(MediaFormat format) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return "color=unknown";
+        }
+        String range = format.containsKey(MediaFormat.KEY_COLOR_RANGE) ?
+                String.valueOf(format.getInteger(MediaFormat.KEY_COLOR_RANGE)) : "-";
+        String standard = format.containsKey(MediaFormat.KEY_COLOR_STANDARD) ?
+                String.valueOf(format.getInteger(MediaFormat.KEY_COLOR_STANDARD)) : "-";
+        String transfer = format.containsKey(MediaFormat.KEY_COLOR_TRANSFER) ?
+                String.valueOf(format.getInteger(MediaFormat.KEY_COLOR_TRANSFER)) : "-";
+        return "colorRange=" + range + ", colorStandard=" + standard + ", colorTransfer=" + transfer;
     }
 
     private static byte[] withStartCode(byte[] nal) {
