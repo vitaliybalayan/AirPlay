@@ -6,12 +6,16 @@ import android.net.nsd.NsdServiceInfo
 import android.util.Log
 
 class AirPlayPublisher(private val context: Context, private val onLog: (String) -> Unit) {
+    private companion object {
+        const val TAG = "AirPlayPublisher"
+    }
+
     private var nsdManager: NsdManager? = null
     private var airPlayRegistrationListener: NsdManager.RegistrationListener? = null
     private var raopRegistrationListener: NsdManager.RegistrationListener? = null
 
     private fun log(message: String) {
-        Log.d("AirPlayPublisher", message)
+        Log.i(TAG, message)
         onLog("[Publisher] $message")
     }
 
@@ -67,12 +71,14 @@ class AirPlayPublisher(private val context: Context, private val onLog: (String)
                 log("AirPlay Service registered: ${info.serviceName} port=$airplayPort")
             }
             override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
+                Log.e(TAG, "AirPlay Registration FAILED: service=${info.serviceName} errorCode=$errorCode")
                 log("AirPlay Registration FAILED: $errorCode")
             }
             override fun onServiceUnregistered(arg0: NsdServiceInfo) {
                 log("AirPlay Service unregistered")
             }
             override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {
+                Log.e(TAG, "AirPlay Unregistration failed: service=${info.serviceName} errorCode=$errorCode")
                 log("AirPlay Unregistration failed: $errorCode")
             }
         }
@@ -82,12 +88,14 @@ class AirPlayPublisher(private val context: Context, private val onLog: (String)
                 log("RAOP Service registered: ${info.serviceName} port=$raopPort")
             }
             override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
+                Log.e(TAG, "RAOP Registration FAILED: service=${info.serviceName} errorCode=$errorCode")
                 log("RAOP Registration FAILED: $errorCode")
             }
             override fun onServiceUnregistered(arg0: NsdServiceInfo) {
                 log("RAOP Service unregistered")
             }
             override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) {
+                Log.e(TAG, "RAOP Unregistration failed: service=${info.serviceName} errorCode=$errorCode")
                 log("RAOP Unregistration failed: $errorCode")
             }
         }
@@ -98,6 +106,7 @@ class AirPlayPublisher(private val context: Context, private val onLog: (String)
             log("Registering RAOP")
             nsdManager?.registerService(raopServiceInfo, NsdManager.PROTOCOL_DNS_SD, raopRegistrationListener)
         } catch (e: Exception) {
+            Log.e(TAG, "Exception in publish", e)
             log("Exception in publish: ${e.message}")
             e.printStackTrace()
         }
@@ -105,9 +114,11 @@ class AirPlayPublisher(private val context: Context, private val onLog: (String)
 
     fun stopPublishing() {
         try {
+            log("Stopping mDNS publishing")
             airPlayRegistrationListener?.let { nsdManager?.unregisterService(it) }
             raopRegistrationListener?.let { nsdManager?.unregisterService(it) }
         } catch (e: Exception) {
+            Log.w(TAG, "Exception while stopping mDNS publishing", e)
             e.printStackTrace()
         }
     }

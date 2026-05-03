@@ -3,6 +3,7 @@ package com.example.airplay
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.util.Log
 import android.view.SurfaceView
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -36,6 +37,9 @@ import java.util.Locale
 import com.fang.myapplication.RaopServer
 
 class MainActivity : ComponentActivity() {
+    private companion object {
+        const val TAG = "AirPlayMain"
+    }
 
     private lateinit var airPlayPublisher: AirPlayPublisher
     private var raopServer: RaopServer? = null
@@ -62,6 +66,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun addLog(msg: String) {
+        Log.i(TAG, msg)
         if (!shouldKeepLog(msg)) return
         runOnUiThread {
             val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
@@ -92,6 +97,7 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalTvMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.i(TAG, "onCreate: starting AirPlay receiver")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -127,12 +133,14 @@ class MainActivity : ComponentActivity() {
                             try {
                                 addLog("Creating RaopServer (C++ engine)...")
                                 raopServer = RaopServer(surfaceView)
+                                Log.i(TAG, "RaopServer created")
 
                                 raopServer?.setLogListener(RaopServer.LogListener { msg ->
                                     addLog(msg)
                                 })
                                 raopServer?.setVideoSizeListener(object : RaopServer.VideoSizeListener {
                                     override fun onVideoSizeChanged(width: Int, height: Int) {
+                                        Log.i(TAG, "Video size changed: ${width}x${height}")
                                         runOnUiThread {
                                             videoWidthState.value = width
                                             videoHeightState.value = height
@@ -154,9 +162,11 @@ class MainActivity : ComponentActivity() {
                                     Thread {
                                         try {
                                             val testSock = Socket("127.0.0.1", raopPort)
+                                            Log.i(TAG, "TCP localhost test OK: port=$raopPort")
                                             addLog("TCP localhost test: port $raopPort OK ✓")
                                             testSock.close()
                                         } catch (e: Exception) {
+                                            Log.w(TAG, "TCP localhost test failed: port=$raopPort", e)
                                             addLog("TCP localhost test FAILED: ${e.message}")
                                         }
                                     }.start()
@@ -166,12 +176,15 @@ class MainActivity : ComponentActivity() {
                                     Thread {
                                         try {
                                             val testServer = ServerSocket(7000)
+                                            Log.i(TAG, "Debug TCP test server listening on port 7000")
                                             addLog("Test server on port 7000 listening...")
                                             val client = testServer.accept()
+                                            Log.i(TAG, "Debug TCP test server got connection from ${client.inetAddress}")
                                             addLog("*** GOT CONNECTION on port 7000 from ${client.inetAddress} ***")
                                             client.close()
                                             testServer.close()
                                         } catch (e: Exception) {
+                                            Log.w(TAG, "Debug TCP test server failed", e)
                                             addLog("Test server 7000: ${e.message}")
                                         }
                                     }.start()
@@ -181,12 +194,15 @@ class MainActivity : ComponentActivity() {
                                     addLog("=== READY! Waiting for iPhone ===")
                                     addLog("Try: from iPhone Settings > Wi-Fi check same network as $wifiIp")
                                 } else {
+                                    Log.e(TAG, "RAOP server returned port 0")
                                     addLog("ERROR: raopPort=0!")
                                 }
                             } catch (e: UnsatisfiedLinkError) {
+                                Log.e(TAG, "Native library error", e)
                                 addLog("NATIVE LIB ERROR: ${e.message}")
                                 e.printStackTrace()
                             } catch (e: Exception) {
+                                Log.e(TAG, "Startup crash", e)
                                 addLog("CRASH: ${e.javaClass.simpleName}: ${e.message}")
                                 e.printStackTrace()
                             }
@@ -199,6 +215,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.i(TAG, "onDestroy: stopping AirPlay receiver")
         airPlayPublisher.stopPublishing()
         raopServer?.stopServer()
         isVideoPlayingState.value = false
@@ -206,6 +223,7 @@ class MainActivity : ComponentActivity() {
         videoHeightState.value = 0
         if (multicastLock.isHeld) {
             multicastLock.release()
+            Log.i(TAG, "Multicast lock released")
         }
     }
 
