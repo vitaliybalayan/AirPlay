@@ -22,6 +22,7 @@ public class RaopServer implements SurfaceHolder.Callback {
     private long mServerId = 0;
     private boolean mLoggedVideoConfig = false;
     private boolean mLoggedFirstVideoFrame = false;
+    private boolean mLoggedFirstAudioPacket = false;
     
     // Listener for forwarding C++ logs to Kotlin UI
     public interface LogListener {
@@ -35,10 +36,12 @@ public class RaopServer implements SurfaceHolder.Callback {
     private VideoSizeListener mVideoSizeListener;
 
     public RaopServer(SurfaceView surfaceView) {
+        Log.i(TAG, "constructor: loading RAOP server for surface=" + surfaceView);
         mSurfaceView = surfaceView;
         mSurfaceView.getHolder().addCallback(this);
         mAudioPlayer = new AudioPlayer();
         mAudioPlayer.start();
+        Log.i(TAG, "constructor: AudioPlayer started");
     }
     
     public void setLogListener(LogListener listener) {
@@ -60,13 +63,24 @@ public class RaopServer implements SurfaceHolder.Callback {
             default: prefix = "[C++ L" + level + "]"; break;
         }
         String fullMsg = prefix + " " + message;
-        Log.d(TAG, fullMsg);
+        if (level == 3) {
+            Log.e(TAG, fullMsg);
+        } else if (level == 4) {
+            Log.w(TAG, fullMsg);
+        } else {
+            Log.i(TAG, fullMsg);
+        }
         if (mLogListener != null) {
             mLogListener.onLog(fullMsg);
         }
     }
 
     public void onRecvVideoData(byte[] nal, int nalType, long dts, long pts) {
+        if (nalType == 0 && !mLoggedVideoConfig) {
+            Log.i(TAG, "onRecvVideoData: first SPS/PPS bytes=" + nal.length + " pts=" + pts);
+        } else if (nalType != 0 && !mLoggedFirstVideoFrame) {
+            Log.i(TAG, "onRecvVideoData: first video frame bytes=" + nal.length + " nalType=" + nalType + " pts=" + pts);
+        }
         if (mLogListener != null) {
             if (nalType == 0 && !mLoggedVideoConfig) {
                 mLoggedVideoConfig = true;
@@ -86,6 +100,13 @@ public class RaopServer implements SurfaceHolder.Callback {
     }
 
     public void onRecvAudioData(short[] pcm, long pts) {
+        if (!mLoggedFirstAudioPacket) {
+            mLoggedFirstAudioPacket = true;
+            Log.i(TAG, "onRecvAudioData: first audio packet samples=" + pcm.length + " pts=" + pts);
+            if (mLogListener != null) {
+                mLogListener.onLog("[Audio] First PCM packet samples=" + pcm.length + ", pts=" + pts);
+            }
+        }
         PCMPacket pcmPacket = new PCMPacket();
         pcmPacket.data = pcm;
         pcmPacket.pts = pts;
@@ -93,6 +114,7 @@ public class RaopServer implements SurfaceHolder.Callback {
     }
 
     public void onAudioVolumeChanged(float volume) {
+        Log.i(TAG, "onAudioVolumeChanged: " + volume + " dB");
         mAudioPlayer.setAirPlayVolume(volume);
         if (mLogListener != null) {
             mLogListener.onLog("[Audio] Volume changed to " + volume + " dB");
@@ -101,7 +123,7 @@ public class RaopServer implements SurfaceHolder.Callback {
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        Log.d(TAG, "surfaceCreated");
+        Log.i(TAG, "surfaceCreated");
         if (mLogListener != null) {
             mLogListener.onLog("[Surface] surfaceCreated");
         }
@@ -109,7 +131,9 @@ public class RaopServer implements SurfaceHolder.Callback {
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        Log.i(TAG, "surfaceChanged: format=" + format + " size=" + width + "x" + height);
         if (mVideoPlayer == null) {
+            Log.i(TAG, "surfaceChanged: creating VideoPlayer");
             mVideoPlayer = new VideoPlayer(holder.getSurface(), new VideoPlayer.LogListener() {
                 @Override
                 public void onLog(String message) {
@@ -126,12 +150,13 @@ public class RaopServer implements SurfaceHolder.Callback {
                 }
             });
             mVideoPlayer.start();
+            Log.i(TAG, "surfaceChanged: VideoPlayer started");
         }
     }
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
-        Log.d(TAG, "surfaceDestroyed");
+        Log.i(TAG, "surfaceDestroyed");
         if (mVideoPlayer != null) {
             mVideoPlayer.release();
             mVideoPlayer = null;
@@ -143,19 +168,25 @@ public class RaopServer implements SurfaceHolder.Callback {
 
     public void startServer() {
         if (mServerId == 0) {
+            Log.i(TAG, "startServer: calling native start()");
             mServerId = start();
+            Log.i(TAG, "startServer: native serverId=" + mServerId + " port=" + getPort());
             if (mLogListener != null) {
                 mLogListener.onLog("[RAOP] startServer() mServerId=" + mServerId);
             }
+        } else {
+            Log.i(TAG, "startServer: already started serverId=" + mServerId + " port=" + getPort());
         }
     }
 
     public void stopServer() {
+        Log.i(TAG, "stopServer: serverId=" + mServerId);
         if (mServerId != 0) {
             stop(mServerId);
         }
         mServerId = 0;
         mAudioPlayer.stopPlay();
+        Log.i(TAG, "stopServer: AudioPlayer stopped");
         if (mVideoSizeListener != null) {
             mVideoSizeListener.onVideoSizeChanged(0, 0);
         }

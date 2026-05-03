@@ -63,7 +63,7 @@ public class AudioPlayer extends Thread {
     private void doPlay(PCMPacket pcmPacket) {
         if (pcmPacket != null && pcmPacket.data != null) {
             try {
-                mTrack.write(pcmPacket.data, 0, Math.min(pcmPacket.data.length, 960));
+                mTrack.write(pcmPacket.data, 0, pcmPacket.data.length);
             } catch (IllegalStateException ignored) {
             }
         }

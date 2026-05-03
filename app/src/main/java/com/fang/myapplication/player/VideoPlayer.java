@@ -379,10 +379,7 @@ public class VideoPlayer extends Thread {
             return;
         }
         if (mLastVideoFrameRealtimeMs > 0 && now - mLastVideoFrameRealtimeMs > VIDEO_GAP_RESET_MS) {
-            clearQueuedFrames(false);
-            flushDecoder("video-gap");
-            waitForSyncFrame("video-gap");
-            return;
+            log("Video gap detected, preserving decoder state gapMs=" + (now - mLastVideoFrameRealtimeMs) + ", pts=" + nalPacket.pts);
         }
         if (mLastVideoPtsUs != Long.MIN_VALUE &&
                 nalPacket.pts > 0 &&
