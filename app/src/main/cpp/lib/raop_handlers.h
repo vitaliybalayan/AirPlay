@@ -104,7 +104,7 @@ raop_handler_server_info(raop_conn_t *conn,
     (void)request;
 
     root_node = plist_new_dict();
-    plist_dict_set_item(root_node, "features", plist_new_uint(0));
+    plist_dict_set_item(root_node, "features", plist_new_uint(GLOBAL_FEATURES));
     plist_dict_set_item(root_node, "model", plist_new_string(GLOBAL_MODEL));
     plist_dict_set_item(root_node, "name", plist_new_string("Android TV"));
     plist_dict_set_item(root_node, "sourceVersion", plist_new_string("220.68"));
@@ -729,4 +729,194 @@ raop_handler_record(raop_conn_t *conn,
     logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] RECORD audio stream ready", conn->id);
     http_response_add_header(response, "Audio-Latency", "11025");
     http_response_add_header(response, "Audio-Jack-Status", "connected; type=analog");
+}
+
+static char *
+raop_copy_trimmed_value(const char *start, size_t len)
+{
+    while (len > 0 && isspace((unsigned char)*start)) {
+        start++;
+        len--;
+    }
+    while (len > 0 && isspace((unsigned char)start[len - 1])) {
+        len--;
+    }
+    char *out = calloc(1, len + 1);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, start, len);
+    return out;
+}
+
+static char *
+raop_find_text_parameter(const char *data, int datalen, const char *name)
+{
+    const char *cursor = data;
+    size_t name_len = strlen(name);
+
+    if (!data || datalen <= 0 || !name) {
+        return NULL;
+    }
+    while (cursor < data + datalen) {
+        const char *line_end = memchr(cursor, '\n', (data + datalen) - cursor);
+        const char *value;
+        size_t line_len = line_end ? (size_t)(line_end - cursor) : (size_t)((data + datalen) - cursor);
+        if (line_len > 0 && cursor[line_len - 1] == '\r') {
+            line_len--;
+        }
+        if (line_len > name_len && !strncasecmp(cursor, name, name_len) && cursor[name_len] == ':') {
+            value = cursor + name_len + 1;
+            return raop_copy_trimmed_value(value, line_len - name_len - 1);
+        }
+        if (!line_end) {
+            break;
+        }
+        cursor = line_end + 1;
+    }
+    return NULL;
+}
+
+static char *
+raop_get_plist_string_copy(plist_t root_node, const char *key)
+{
+    plist_t value_node;
+    char *value = NULL;
+
+    if (!root_node || !key) {
+        return NULL;
+    }
+    value_node = plist_dict_get_item(root_node, key);
+    if (!value_node) {
+        return NULL;
+    }
+    plist_get_string_val(value_node, &value);
+    return value;
+}
+
+static char *
+raop_extract_direct_play_url(http_request_t *request)
+{
+    const char *content_location;
+    const char *content_type;
+    const char *data;
+    int datalen = 0;
+    char *url = NULL;
+
+    content_location = http_request_get_header(request, "Content-Location");
+    if (content_location && content_location[0]) {
+        return strdup(content_location);
+    }
+
+    content_type = http_request_get_header(request, "Content-Type");
+    data = http_request_get_data(request, &datalen);
+    if (!data || datalen <= 0) {
+        return NULL;
+    }
+
+    if (content_type && !strcmp(content_type, "application/x-apple-binary-plist")) {
+        plist_t root_node = NULL;
+        plist_from_bin(data, datalen, &root_node);
+        if (root_node) {
+            url = raop_get_plist_string_copy(root_node, "Content-Location");
+            if (!url) url = raop_get_plist_string_copy(root_node, "content-location");
+            if (!url) url = raop_get_plist_string_copy(root_node, "URL");
+            if (!url) url = raop_get_plist_string_copy(root_node, "url");
+            if (!url) url = raop_get_plist_string_copy(root_node, "location");
+            plist_free(root_node);
+        }
+        return url;
+    }
+
+    url = raop_find_text_parameter(data, datalen, "Content-Location");
+    if (!url) url = raop_find_text_parameter(data, datalen, "URL");
+    if (!url) url = raop_find_text_parameter(data, datalen, "url");
+    return url;
+}
+
+static int
+raop_is_supported_direct_play_url(const char *url)
+{
+    if (!url || !url[0]) {
+        return 0;
+    }
+    return !strncasecmp(url, "http://", 7) ||
+           !strncasecmp(url, "https://", 8);
+}
+
+static void
+raop_handler_direct_play(raop_conn_t *conn,
+                         http_request_t *request, http_response_t *response,
+                         char **response_data, int *response_datalen)
+{
+    char *url = raop_extract_direct_play_url(request);
+
+    (void)response_data;
+    (void)response_datalen;
+
+    if (url && url[0] && raop_is_supported_direct_play_url(url)) {
+        logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Direct play URL: %s", conn->id, url);
+        if (conn->raop->callbacks.direct_play) {
+            conn->raop->callbacks.direct_play(conn->raop->callbacks.cls, url);
+        }
+    } else if (url && url[0]) {
+        logger_log(conn->raop->logger, LOGGER_WARNING,
+                   "[RTSP#%d] Direct play URL scheme is not supported: %s",
+                   conn->id, url);
+    } else {
+        logger_log(conn->raop->logger, LOGGER_WARNING, "[RTSP#%d] Direct play requested without URL", conn->id);
+    }
+    http_response_add_header(response, "Content-Type", "text/parameters");
+    free(url);
+}
+
+static void
+raop_handler_direct_stop(raop_conn_t *conn,
+                         http_request_t *request, http_response_t *response,
+                         char **response_data, int *response_datalen)
+{
+    (void)request;
+    (void)response;
+    (void)response_data;
+    (void)response_datalen;
+
+    logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Direct stop", conn->id);
+    if (conn->raop->callbacks.direct_stop) {
+        conn->raop->callbacks.direct_stop(conn->raop->callbacks.cls, "direct-stop");
+    }
+}
+
+static void
+raop_handler_playback_info(raop_conn_t *conn,
+                           http_request_t *request, http_response_t *response,
+                           char **response_data, int *response_datalen)
+{
+    plist_t root_node = plist_new_dict();
+
+    (void)conn;
+    (void)request;
+
+    plist_dict_set_item(root_node, "duration", plist_new_real(0.0));
+    plist_dict_set_item(root_node, "position", plist_new_real(0.0));
+    plist_dict_set_item(root_node, "rate", plist_new_real(1.0));
+    plist_dict_set_item(root_node, "readyToPlay", plist_new_bool(1));
+    plist_dict_set_item(root_node, "playbackBufferEmpty", plist_new_bool(0));
+    plist_dict_set_item(root_node, "playbackBufferFull", plist_new_bool(1));
+    plist_dict_set_item(root_node, "playbackLikelyToKeepUp", plist_new_bool(1));
+    raop_write_plist_response(response, root_node, response_data, response_datalen);
+    plist_free(root_node);
+}
+
+static void
+raop_handler_empty_plist(raop_conn_t *conn,
+                         http_request_t *request, http_response_t *response,
+                         char **response_data, int *response_datalen)
+{
+    plist_t root_node = plist_new_dict();
+
+    (void)conn;
+    (void)request;
+
+    raop_write_plist_response(response, root_node, response_data, response_datalen);
+    plist_free(root_node);
 }

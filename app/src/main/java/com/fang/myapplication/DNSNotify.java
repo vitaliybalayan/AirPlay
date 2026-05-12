@@ -13,6 +13,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class DNSNotify {
 
     public static String TAG = "DNSNotify";
+    private static final String AIRPLAY_FEATURES = "0x5A7FFFC0,0x0";
 
     private Register mAirplayRegister;
     private Register mRaopRegister;
@@ -51,7 +52,7 @@ public class DNSNotify {
         log("registerAirplay port=" + port + " mac=" + mMacAddress + " pk=" + mPublicKey.substring(0, Math.min(16, mPublicKey.length())) + "...");
         TXTRecord txtRecord = new TXTRecord();
         txtRecord.set("deviceid", mMacAddress);
-        txtRecord.set("features", "0x5A7FFFF7,0x1E");
+        txtRecord.set("features", AIRPLAY_FEATURES);
         txtRecord.set("srcvers", "220.68");
         txtRecord.set("flags", "0x4");
         txtRecord.set("vv", "2");
@@ -71,7 +72,7 @@ public class DNSNotify {
         txtRecord.set("da", "true");
         txtRecord.set("et", "0,3,5");
         txtRecord.set("vv", "2");
-        txtRecord.set("ft", "0x5A7FFFF7,0x1E");
+        txtRecord.set("ft", AIRPLAY_FEATURES);
         txtRecord.set("am", "AppleTV2,1");
         txtRecord.set("md", "0,1,2");
         txtRecord.set("rhd", "5.6.0.0");

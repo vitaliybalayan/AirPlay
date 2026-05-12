@@ -476,11 +476,31 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		handler = &raop_handler_audio_mode;
 	} else if (!strcmp(method, "RECORD")) {
         handler = &raop_handler_record;
-	} else if (is_direct_play_url(url)) {
-		code = 501;
-		message = "Not Implemented";
-		logger_log(conn->raop->logger, LOGGER_WARNING,
-		           "[RTSP#%d] Direct AirPlay playback endpoint %s is not implemented; receiver currently supports mirroring/RAOP only",
+	} else if (url_path_matches(url, "/play")) {
+		char *direct_url = raop_extract_direct_play_url(request);
+		if (direct_url && direct_url[0] && !raop_is_supported_direct_play_url(direct_url)) {
+			code = 501;
+			message = "Not Implemented";
+			logger_log(conn->raop->logger, LOGGER_WARNING,
+			           "[RTSP#%d] Rejecting unsupported direct playback URL: %s",
+			           conn->id, direct_url);
+			handled = 1;
+		} else {
+			handler = &raop_handler_direct_play;
+		}
+		free(direct_url);
+	} else if (url_path_matches(url, "/stop")) {
+		handler = &raop_handler_direct_stop;
+	} else if (url_path_matches(url, "/playback-info")) {
+		handler = &raop_handler_playback_info;
+	} else if (url_path_matches(url, "/getProperty") ||
+	           url_path_matches(url, "/setProperty")) {
+		handler = &raop_handler_empty_plist;
+	} else if (url_path_matches(url, "/action") ||
+	           url_path_matches(url, "/rate") ||
+	           url_path_matches(url, "/scrub")) {
+		logger_log(conn->raop->logger, LOGGER_INFO,
+		           "[RTSP#%d] Direct AirPlay endpoint %s accepted",
 		           conn->id, url);
 		handled = 1;
 	} else if (!strcmp(method, "FLUSH")) {

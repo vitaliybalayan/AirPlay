@@ -1,5 +1,6 @@
 package com.fang.myapplication;
 
+import android.media.MediaPlayer;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -25,6 +26,7 @@ public class RaopServer implements SurfaceHolder.Callback {
 
     private VideoPlayer mVideoPlayer;
     private AudioPlayer mAudioPlayer;
+    private MediaPlayer mDirectPlayer;
     private SurfaceView mSurfaceView;
     private SurfaceHolder mSurfaceHolder;
     private final Handler mMainHandler = new Handler(Looper.getMainLooper());
@@ -171,6 +173,32 @@ public class RaopServer implements SurfaceHolder.Callback {
         });
     }
 
+    public void onDirectPlay(String url) {
+        Log.i(TAG, "onDirectPlay: url=" + url);
+        if (mLogListener != null) {
+            mLogListener.onLog("[Direct] Play requested");
+        }
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                startDirectPlayer(url);
+            }
+        });
+    }
+
+    public void onDirectStop(String reason) {
+        Log.i(TAG, "onDirectStop: reason=" + reason);
+        if (mLogListener != null) {
+            mLogListener.onLog("[Direct] Stop: " + reason);
+        }
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                stopDirectPlayer(reason != null ? reason : "direct-stop");
+            }
+        });
+    }
+
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i(TAG, "surfaceCreated");
@@ -216,6 +244,7 @@ public class RaopServer implements SurfaceHolder.Callback {
         }
         mServerId = 0;
         resetVideoOutput("server-stop");
+        stopDirectPlayer("server-stop");
         mAudioPlayer.stopPlay();
         Log.i(TAG, "stopServer: AudioPlayer stopped");
     }
@@ -261,6 +290,102 @@ public class RaopServer implements SurfaceHolder.Callback {
             mVideoPlayer.releaseAndWait(VIDEO_PLAYER_RELEASE_TIMEOUT_MS);
             mVideoPlayer = null;
         }
+        if (mVideoSizeListener != null) {
+            mVideoSizeListener.onVideoSizeChanged(0, 0);
+        }
+    }
+
+    private void startDirectPlayer(String url) {
+        if (url == null || url.trim().isEmpty()) {
+            Log.w(TAG, "startDirectPlayer: empty URL");
+            return;
+        }
+        SurfaceHolder holder = mSurfaceHolder != null ? mSurfaceHolder : mSurfaceView.getHolder();
+        if (holder == null || holder.getSurface() == null || !holder.getSurface().isValid()) {
+            Log.w(TAG, "startDirectPlayer: surface is not ready");
+            return;
+        }
+
+        resetVideoOutput("direct-play");
+        stopDirectPlayer("replace-direct");
+
+        try {
+            MediaPlayer player = new MediaPlayer();
+            mDirectPlayer = player;
+            player.setSurface(holder.getSurface());
+            player.setDataSource(url);
+            player.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                @Override
+                public void onPrepared(MediaPlayer mp) {
+                    Log.i(TAG, "Direct MediaPlayer prepared");
+                    if (mVideoSizeListener != null) {
+                        int width = Math.max(mp.getVideoWidth(), 1);
+                        int height = Math.max(mp.getVideoHeight(), 1);
+                        mVideoSizeListener.onVideoSizeChanged(width, height);
+                    }
+                    mp.start();
+                }
+            });
+            player.setOnVideoSizeChangedListener(new MediaPlayer.OnVideoSizeChangedListener() {
+                @Override
+                public void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
+                    Log.i(TAG, "Direct video size: " + width + "x" + height);
+                    if (mVideoSizeListener != null && width > 0 && height > 0) {
+                        mVideoSizeListener.onVideoSizeChanged(width, height);
+                    }
+                }
+            });
+            player.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                @Override
+                public void onCompletion(MediaPlayer mp) {
+                    Log.i(TAG, "Direct MediaPlayer completed");
+                    stopDirectPlayer("completion");
+                }
+            });
+            player.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override
+                public boolean onError(MediaPlayer mp, int what, int extra) {
+                    Log.e(TAG, "Direct MediaPlayer error what=" + what + " extra=" + extra);
+                    if (mLogListener != null) {
+                        mLogListener.onLog("[Direct] Playback error " + what + "/" + extra);
+                    }
+                    stopDirectPlayer("error");
+                    return true;
+                }
+            });
+            player.prepareAsync();
+            Log.i(TAG, "Direct MediaPlayer prepareAsync started");
+        } catch (Exception e) {
+            Log.e(TAG, "startDirectPlayer failed", e);
+            if (mLogListener != null) {
+                mLogListener.onLog("[Direct] Failed to start playback: " + e.getMessage());
+            }
+            stopDirectPlayer("start-failed");
+        }
+    }
+
+    private void stopDirectPlayer(String reason) {
+        if (mDirectPlayer == null) {
+            return;
+        }
+        Log.i(TAG, "stopDirectPlayer: reason=" + reason);
+        try {
+            mDirectPlayer.setOnPreparedListener(null);
+            mDirectPlayer.setOnVideoSizeChangedListener(null);
+            mDirectPlayer.setOnCompletionListener(null);
+            mDirectPlayer.setOnErrorListener(null);
+            if (mDirectPlayer.isPlaying()) {
+                mDirectPlayer.stop();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Direct MediaPlayer stop failed", e);
+        }
+        try {
+            mDirectPlayer.release();
+        } catch (Exception e) {
+            Log.w(TAG, "Direct MediaPlayer release failed", e);
+        }
+        mDirectPlayer = null;
         if (mVideoSizeListener != null) {
             mVideoSizeListener.onVideoSizeChanged(0, 0);
         }
