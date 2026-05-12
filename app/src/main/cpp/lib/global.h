@@ -1,7 +1,8 @@
 #ifndef GLOBAL_H
 #define GLOBAL_H
 
-#define GLOBAL_FEATURES 0x7
+#define GLOBAL_FEATURES 0x5A7FFFC0
+#define GLOBAL_FEATURES_TXT "0x5A7FFFC0,0x0"
 #define GLOBAL_MODEL    "AppleTV2,1"
 #define GLOBAL_VERSION  "130.14"
 

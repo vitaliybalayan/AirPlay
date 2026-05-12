@@ -8,6 +8,7 @@ import android.util.Log
 class AirPlayPublisher(private val context: Context, private val onLog: (String) -> Unit) {
     private companion object {
         const val TAG = "AirPlayPublisher"
+        const val AIRPLAY_FEATURES = "0x5A7FFFC0,0x0"
     }
 
     private var nsdManager: NsdManager? = null
@@ -28,7 +29,7 @@ class AirPlayPublisher(private val context: Context, private val onLog: (String)
             serviceType = "_airplay._tcp"
             port = airplayPort
             setAttribute("deviceid", macAddress)
-            setAttribute("features", "0x5A7FFFF7,0x1E")
+            setAttribute("features", AIRPLAY_FEATURES)
             setAttribute("model", "AppleTV2,1")
             setAttribute("srcvers", "220.68")
             setAttribute("vv", "2")
@@ -50,7 +51,7 @@ class AirPlayPublisher(private val context: Context, private val onLog: (String)
             setAttribute("da", "true")
             setAttribute("et", "0,3,5")
             setAttribute("vv", "2")
-            setAttribute("ft", "0x5A7FFFF7,0x1E")
+            setAttribute("ft", AIRPLAY_FEATURES)
             setAttribute("am", "AppleTV2,1")
             setAttribute("md", "0,1,2")
             setAttribute("rhd", "5.6.0.0")
