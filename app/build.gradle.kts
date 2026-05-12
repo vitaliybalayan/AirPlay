@@ -10,7 +10,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.airplay"
+        applicationId = "com.vitaliybalayan.airplay"
         minSdk = 21
         targetSdk = 36
         versionCode = 1
