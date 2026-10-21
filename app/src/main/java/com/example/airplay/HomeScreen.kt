@@ -374,9 +374,9 @@ private fun StepsCard(
             Spacer(modifier = Modifier.height(10.dp))
             Text(
                 text = if (isRussian) {
-                    "В списке «Поверх других приложений» найдите AirPlay и включите"
+                    "В списке «Поверх других приложений» найдите Screen Mirror for iPhone и включите"
                 } else {
-                    "In \"Display over other apps\", find AirPlay and turn it on"
+                    "In \"Display over other apps\", find Screen Mirror for iPhone and turn it on"
                 },
                 color = Tertiary,
                 fontSize = 13.sp,
@@ -409,7 +409,7 @@ fun SplashIntro(isRussian: Boolean, onFinished: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "AirPlay",
+                text = "Screen Mirror",
                 color = Color.White,
                 fontSize = 40.sp,
                 fontWeight = FontWeight.Bold,
@@ -421,7 +421,7 @@ fun SplashIntro(isRussian: Boolean, onFinished: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = if (isRussian) "для Android TV" else "for Android TV",
+                text = if (isRussian) "для iPhone, iPad и Mac" else "for iPhone, iPad and Mac",
                 color = Secondary,
                 fontSize = 16.sp,
                 modifier = Modifier.graphicsLayer {
