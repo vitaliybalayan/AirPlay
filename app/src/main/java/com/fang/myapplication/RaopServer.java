@@ -32,6 +32,7 @@ import com.fang.myapplication.player.AudioPlayer;
 import com.fang.myapplication.player.VideoPlayer;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Locale;
 
 public class RaopServer implements SurfaceHolder.Callback {
@@ -56,8 +57,19 @@ public class RaopServer implements SurfaceHolder.Callback {
     private NALPacket mLastCodecConfig;
     private AudioPlayer mAudioPlayer;
     private ExoPlayer mDirectPlayer;
+    private final Context mAppContext;
     private SurfaceView mSurfaceView;
     private SurfaceHolder mSurfaceHolder;
+    // Video that arrives before a screen is attached (the UI is still launching), replayed on attach.
+    private static final int MAX_PENDING_VIDEO_BYTES = 32 * 1024 * 1024;
+    private final ArrayList<NALPacket> mPendingVideo = new ArrayList<>();
+    private int mPendingVideoBytes = 0;
+    private boolean mScreenRequestedForStream = false;
+    private String mPendingDirectUrl;
+    private double mPendingDirectStartSeconds;
+    private double mPendingDirectStartFraction;
+    private volatile int mVideoWidth = 0;
+    private volatile int mVideoHeight = 0;
     private final Handler mMainHandler = new Handler(Looper.getMainLooper());
     private long mServerId = 0;
     private boolean mLoggedVideoConfig = false;
@@ -131,6 +143,12 @@ public class RaopServer implements SurfaceHolder.Callback {
     }
     private VideoSizeListener mVideoSizeListener;
 
+    /** Asks the host (background service) to bring the receiver UI to the front. */
+    public interface ScreenRequestListener {
+        void onScreenNeeded(String reason);
+    }
+    private volatile ScreenRequestListener mScreenRequestListener;
+
     /** What an AirPlay audio sender (music, video sound via the player button) is playing. */
     public static final class NowPlaying {
         public final boolean active;
@@ -168,18 +186,27 @@ public class RaopServer implements SurfaceHolder.Callback {
     private static final int COMPRESSION_ALAC = 2;
     private NowPlaying mNowPlaying = new NowPlaying(false, null, null, null, null, 0, 0, 0);
     private volatile long mLastAudioPacketRealtimeMs = 0L;
+    // RTP timestamp where the current track starts (from "progress"), -1 when unknown.
+    private volatile long mTrackStartRtp = -1L;
+
+    public long getTrackStartRtp() {
+        return mTrackStartRtp;
+    }
+
+    /** RTP timestamp of the audio coming out of the speakers right now, or -1. */
+    public long getPlayingRtpTimestamp() {
+        return mAudioPlayer.getPlayingRtpTimestamp();
+    }
 
     /** When the last audio packet arrived; the sender stops streaming while paused. */
     public long getLastAudioPacketRealtimeMs() {
         return mLastAudioPacketRealtimeMs;
     }
 
-    public RaopServer(SurfaceView surfaceView) {
-        Log.i(TAG, "constructor: loading RAOP server for surface=" + surfaceView);
-        mSurfaceView = surfaceView;
-        mSurfaceView.getHolder().addCallback(this);
-        mAudioManager = (AudioManager) surfaceView.getContext().getApplicationContext()
-                .getSystemService(Context.AUDIO_SERVICE);
+    public RaopServer(Context context) {
+        Log.i(TAG, "constructor: loading RAOP server");
+        mAppContext = context.getApplicationContext();
+        mAudioManager = (AudioManager) mAppContext.getSystemService(Context.AUDIO_SERVICE);
         mAudioPlayer = new AudioPlayer();
         mAudioPlayer.start();
         Log.i(TAG, "constructor: AudioPlayer started");
@@ -198,6 +225,110 @@ public class RaopServer implements SurfaceHolder.Callback {
         mNowPlayingListener = listener;
     }
 
+    public void setScreenRequestListener(ScreenRequestListener listener) {
+        mScreenRequestListener = listener;
+    }
+
+    public NowPlaying getNowPlaying() {
+        return mNowPlaying;
+    }
+
+    public int getVideoWidth() {
+        return mVideoWidth;
+    }
+
+    public int getVideoHeight() {
+        return mVideoHeight;
+    }
+
+    private void requestScreen(String reason) {
+        ScreenRequestListener listener = mScreenRequestListener;
+        if (listener != null) {
+            listener.onScreenNeeded(reason);
+        }
+    }
+
+    private void dispatchVideoSize(int width, int height) {
+        mVideoWidth = width;
+        mVideoHeight = height;
+        if (mVideoSizeListener != null) {
+            mVideoSizeListener.onVideoSizeChanged(width, height);
+        }
+    }
+
+    /** Called by the UI when its SurfaceView exists; the server outlives any single Activity. */
+    public void attachSurfaceView(final SurfaceView view) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (mSurfaceView == view) {
+                    return;
+                }
+                if (mSurfaceView != null) {
+                    mSurfaceView.getHolder().removeCallback(RaopServer.this);
+                }
+                Log.i(TAG, "attachSurfaceView");
+                mSurfaceView = view;
+                SurfaceHolder holder = view.getHolder();
+                holder.addCallback(RaopServer.this);
+                if (holder.getSurface() != null && holder.getSurface().isValid()) {
+                    onSurfaceAvailable(holder);
+                }
+            }
+        });
+    }
+
+    public void detachSurfaceView(final SurfaceView view) {
+        mMainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (mSurfaceView != view) {
+                    return;
+                }
+                Log.i(TAG, "detachSurfaceView");
+                view.getHolder().removeCallback(RaopServer.this);
+                mSurfaceView = null;
+                mSurfaceHolder = null;
+                stopDirectPlayer("surface-detached");
+                resetVideoOutput("surface-destroyed");
+            }
+        });
+    }
+
+    private void onSurfaceAvailable(SurfaceHolder holder) {
+        mSurfaceHolder = holder;
+        if (mPendingDirectUrl != null) {
+            String url = mPendingDirectUrl;
+            mPendingDirectUrl = null;
+            startDirectPlayer(url, mPendingDirectStartSeconds, mPendingDirectStartFraction);
+            return;
+        }
+        if (mVideoStreamActive && !mDirectActive) {
+            synchronized (mVideoLock) {
+                ensureVideoPlayerLocked();
+            }
+        }
+    }
+
+    private SurfaceHolder currentHolder() {
+        if (mSurfaceHolder != null) {
+            return mSurfaceHolder;
+        }
+        return mSurfaceView != null ? mSurfaceView.getHolder() : null;
+    }
+
+    private void bufferPendingVideoLocked(NALPacket packet) {
+        if (packet.nalType == 0) {
+            // A new codec config starts a decodable sequence; older frames are useless.
+            mPendingVideo.clear();
+            mPendingVideoBytes = 0;
+        } else if (mPendingVideo.isEmpty() || mPendingVideoBytes + packet.nalData.length > MAX_PENDING_VIDEO_BYTES) {
+            return;
+        }
+        mPendingVideo.add(packet);
+        mPendingVideoBytes += packet.nalData.length;
+    }
+
     // Native callbacks below arrive on the RTSP thread.
 
     public void onAudioSession(boolean active, int compressionType) {
@@ -206,6 +337,7 @@ public class RaopServer implements SurfaceHolder.Callback {
         Log.i(TAG, "onAudioSession: active=" + active + " ct=" + compressionType);
         if (show) {
             publishNowPlaying(new NowPlaying(true, null, null, null, null, 0, 0, 0));
+            requestScreen("airplay-audio");
         } else if (!active) {
             publishNowPlaying(mNowPlaying.withActive(false));
         }
@@ -219,6 +351,9 @@ public class RaopServer implements SurfaceHolder.Callback {
         // Progress for the new track sometimes lands just before its metadata; keep that one.
         boolean freshProgress = SystemClock.elapsedRealtime() - np.positionAtMs < 1000;
         boolean newTrack = fields[0] != null && !fields[0].equals(np.title) && !freshProgress;
+        if (newTrack) {
+            mTrackStartRtp = -1L;
+        }
         // A new track starts from zero; the previous track's progress would race the lyrics ahead.
         publishNowPlaying(new NowPlaying(np.active, fields[0], fields[1], fields[2], np.coverArt,
                 newTrack ? 0 : np.durationSec, newTrack ? 0 : np.positionSec, newTrack ? 0 : np.positionAtMs));
@@ -235,6 +370,7 @@ public class RaopServer implements SurfaceHolder.Callback {
         // RTP timestamps are unsigned 32-bit and may wrap.
         double duration = ((end - start) & 0xFFFFFFFFL) / (double) AUDIO_SAMPLE_RATE;
         double position = ((current - start) & 0xFFFFFFFFL) / (double) AUDIO_SAMPLE_RATE;
+        mTrackStartRtp = start & 0xFFFFFFFFL;
         NowPlaying np = mNowPlaying;
         publishNowPlaying(new NowPlaying(np.active, np.title, np.artist, np.album, np.coverArt,
                 duration, Math.min(position, duration), SystemClock.elapsedRealtime()));
@@ -297,19 +433,13 @@ public class RaopServer implements SurfaceHolder.Callback {
         mLastVideoPacketRealtimeMs = SystemClock.elapsedRealtime();
         mVideoStreamActive = true;
         mLoggedVideoIdle = false;
+        // Once per stream; without a UI log listener these used to fire on every frame.
         if (nalType == 0 && !mLoggedVideoConfig) {
+            mLoggedVideoConfig = true;
             Log.i(TAG, "onRecvVideoData: first SPS/PPS bytes=" + nal.length + " pts=" + pts);
         } else if (nalType != 0 && !mLoggedFirstVideoFrame) {
+            mLoggedFirstVideoFrame = true;
             Log.i(TAG, "onRecvVideoData: first video frame bytes=" + nal.length + " nalType=" + nalType + " pts=" + pts);
-        }
-        if (mLogListener != null) {
-            if (nalType == 0 && !mLoggedVideoConfig) {
-                mLoggedVideoConfig = true;
-                mLogListener.onLog("[Video] SPS/PPS received, bytes=" + nal.length);
-            } else if (nalType != 0 && !mLoggedFirstVideoFrame) {
-                mLoggedFirstVideoFrame = true;
-                mLogListener.onLog("[Video] First frame received, bytes=" + nal.length + ", pts=" + pts);
-            }
         }
         NALPacket nalPacket = new NALPacket();
         nalPacket.nalData = nal;
@@ -326,15 +456,24 @@ public class RaopServer implements SurfaceHolder.Callback {
             });
         }
 
+        boolean needScreen = false;
         synchronized (mVideoLock) {
             if (nalType == 0) {
                 mLastCodecConfig = nalPacket;
             }
             VideoPlayer player = mDirectActive ? null : ensureVideoPlayerLocked();
             if (player == null) {
-                return;
+                bufferPendingVideoLocked(nalPacket);
+                if (!mScreenRequestedForStream) {
+                    mScreenRequestedForStream = true;
+                    needScreen = true;
+                }
+            } else {
+                player.addPacker(nalPacket);
             }
-            player.addPacker(nalPacket);
+        }
+        if (needScreen) {
+            requestScreen("mirroring");
         }
     }
 
@@ -482,20 +621,12 @@ public class RaopServer implements SurfaceHolder.Callback {
     public void surfaceCreated(SurfaceHolder holder) {
         Log.i(TAG, "surfaceCreated");
         mSurfaceHolder = holder;
-        if (mLogListener != null) {
-            mLogListener.onLog("[Surface] surfaceCreated");
-        }
     }
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         Log.i(TAG, "surfaceChanged: format=" + format + " size=" + width + "x" + height);
-        mSurfaceHolder = holder;
-        if (mVideoStreamActive && !mDirectActive) {
-            synchronized (mVideoLock) {
-                ensureVideoPlayerLocked();
-            }
-        }
+        onSurfaceAvailable(holder);
     }
 
     @Override
@@ -512,8 +643,7 @@ public class RaopServer implements SurfaceHolder.Callback {
             mServerId = start(deviceName, deviceId);
             publishTvVolumeToNative();
             if (!mVolumeReceiverRegistered) {
-                mSurfaceView.getContext().getApplicationContext()
-                        .registerReceiver(mVolumeReceiver, new IntentFilter(VOLUME_CHANGED_ACTION));
+                mAppContext.registerReceiver(mVolumeReceiver, new IntentFilter(VOLUME_CHANGED_ACTION));
                 mVolumeReceiverRegistered = true;
             }
             Log.i(TAG, "startServer: native serverId=" + mServerId + " port=" + getPort());
@@ -530,7 +660,7 @@ public class RaopServer implements SurfaceHolder.Callback {
         mReleased = true;
         mMainHandler.removeCallbacks(mVideoWatchdog);
         if (mVolumeReceiverRegistered) {
-            mSurfaceView.getContext().getApplicationContext().unregisterReceiver(mVolumeReceiver);
+            mAppContext.unregisterReceiver(mVolumeReceiver);
             mVolumeReceiverRegistered = false;
         }
         if (mServerId != 0) {
@@ -547,9 +677,8 @@ public class RaopServer implements SurfaceHolder.Callback {
         if (mVideoPlayer != null) {
             return mVideoPlayer;
         }
-        SurfaceHolder holder = mSurfaceHolder != null ? mSurfaceHolder : mSurfaceView.getHolder();
+        SurfaceHolder holder = currentHolder();
         if (holder == null || holder.getSurface() == null || !holder.getSurface().isValid()) {
-            Log.w(TAG, "ensureVideoPlayer: surface is not ready");
             return null;
         }
 
@@ -564,14 +693,20 @@ public class RaopServer implements SurfaceHolder.Callback {
         }, new VideoPlayer.VideoSizeListener() {
             @Override
             public void onVideoSizeChanged(int width, int height) {
-                if (mVideoSizeListener != null) {
-                    mVideoSizeListener.onVideoSizeChanged(width, height);
-                }
+                dispatchVideoSize(width, height);
             }
         });
         mVideoPlayer.start();
-        // SPS/PPS is only sent when the stream starts; replay it so a recreated decoder can start.
-        if (mLastCodecConfig != null) {
+        if (!mPendingVideo.isEmpty()) {
+            // Frames received while the UI was launching, starting with their codec config.
+            Log.i(TAG, "ensureVideoPlayer: replaying " + mPendingVideo.size() + " buffered packets");
+            for (NALPacket packet : mPendingVideo) {
+                mVideoPlayer.addPacker(packet);
+            }
+            mPendingVideo.clear();
+            mPendingVideoBytes = 0;
+        } else if (mLastCodecConfig != null) {
+            // SPS/PPS is only sent when the stream starts; replay it so a recreated decoder can start.
             mVideoPlayer.addPacker(mLastCodecConfig);
         }
         Log.i(TAG, "ensureVideoPlayer: VideoPlayer started");
@@ -590,14 +725,18 @@ public class RaopServer implements SurfaceHolder.Callback {
             player = mVideoPlayer;
             mVideoPlayer = null;
             if (!"surface-destroyed".equals(reason)) {
+                // The stream really ended: forget its config and allow the next one to request a screen.
                 mLastCodecConfig = null;
+                mPendingVideo.clear();
+                mPendingVideoBytes = 0;
+                mScreenRequestedForStream = false;
             }
         }
         if (player != null) {
             player.releaseAndWait(VIDEO_PLAYER_RELEASE_TIMEOUT_MS);
-            if (mVideoSizeListener != null) {
-                mVideoSizeListener.onVideoSizeChanged(0, 0);
-            }
+        }
+        if (player != null || !"surface-destroyed".equals(reason)) {
+            dispatchVideoSize(0, 0);
         }
     }
 
@@ -607,10 +746,14 @@ public class RaopServer implements SurfaceHolder.Callback {
             mDirectActive = mDirectPlayer != null;
             return;
         }
-        SurfaceHolder holder = mSurfaceHolder != null ? mSurfaceHolder : mSurfaceView.getHolder();
+        SurfaceHolder holder = currentHolder();
         if (holder == null || holder.getSurface() == null || !holder.getSurface().isValid()) {
-            Log.w(TAG, "startDirectPlayer: surface is not ready");
-            mDirectActive = mDirectPlayer != null;
+            // Start once the UI attaches its surface.
+            Log.i(TAG, "startDirectPlayer: waiting for a surface");
+            mPendingDirectUrl = url;
+            mPendingDirectStartSeconds = startSeconds;
+            mPendingDirectStartFraction = startFraction;
+            requestScreen("direct-play");
             return;
         }
 
@@ -620,7 +763,7 @@ public class RaopServer implements SurfaceHolder.Callback {
         mDirectReady = false;
 
         try {
-            Context context = mSurfaceView.getContext().getApplicationContext();
+            Context context = mAppContext;
             DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
                     .setUserAgent(DIRECT_USER_AGENT)
                     .setAllowCrossProtocolRedirects(true)
@@ -673,9 +816,7 @@ public class RaopServer implements SurfaceHolder.Callback {
                     }
                     int width = (int) (videoSize.width * videoSize.pixelWidthHeightRatio);
                     Log.i(TAG, "Direct video size: " + width + "x" + videoSize.height);
-                    if (mVideoSizeListener != null) {
-                        mVideoSizeListener.onVideoSizeChanged(width, videoSize.height);
-                    }
+                    dispatchVideoSize(width, videoSize.height);
                 }
 
                 @Override
@@ -746,6 +887,7 @@ public class RaopServer implements SurfaceHolder.Callback {
     }
 
     private void stopDirectPlayer(String reason) {
+        mPendingDirectUrl = null;
         mMainHandler.removeCallbacks(mDirectStatePoller);
         mDirectActive = false;
         mDirectReady = false;
@@ -768,9 +910,7 @@ public class RaopServer implements SurfaceHolder.Callback {
         } catch (Exception e) {
             Log.w(TAG, "Direct player release failed", e);
         }
-        if (mVideoSizeListener != null) {
-            mVideoSizeListener.onVideoSizeChanged(0, 0);
-        }
+        dispatchVideoSize(0, 0);
     }
 
     public int getPort() {

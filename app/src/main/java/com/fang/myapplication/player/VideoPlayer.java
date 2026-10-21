@@ -92,6 +92,12 @@ public class VideoPlayer extends Thread {
             format.setByteBuffer("csd-0", ByteBuffer.wrap(withStartCode(mSps)));
             format.setByteBuffer("csd-1", ByteBuffer.wrap(withStartCode(mPps)));
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Math.max(mVideoWidth * mVideoHeight, 1024 * 1024));
+            // Mirroring is interactive: ask for realtime priority and, where supported,
+            // for the decoder to emit each frame immediately instead of buffering several.
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 format.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709);
                 format.setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO);
@@ -108,7 +114,8 @@ public class VideoPlayer extends Thread {
                 log("Decoder ready after dropping " + mDroppedBeforeDecoder + " frames while waiting for SPS/PPS");
                 mDroppedBeforeDecoder = 0;
             }
-            log("MediaCodec started " + mVideoWidth + "x" + mVideoHeight + " reason=" + reason + ", color=bt709/limited-range");
+            log("MediaCodec started " + mVideoWidth + "x" + mVideoHeight + " reason=" + reason
+                    + ", color=bt709/limited-range, lowLatency=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R));
         } catch (Exception e) {
             mDecoder = null;
             logError("MediaCodec init failed", e);
@@ -247,7 +254,8 @@ public class VideoPlayer extends Thread {
             return;
         }
 
-        clearQueuedFrames(false);
+        // Frames queued behind this config belong to the new stream and start with its IDR;
+        // dropping them left the decoder waiting seconds for the next keyframe.
         queuePendingCodecConfig(newSps, newPps, parsedWidth, parsedHeight);
         maybeApplyPendingCodecConfig(true);
     }
@@ -403,7 +411,7 @@ public class VideoPlayer extends Thread {
                 return;
             }
         }
-        applyCodecConfig(mPendingSps, mPendingPps, mPendingVideoWidth, mPendingVideoHeight, "stabilized-config", true, true);
+        applyCodecConfig(mPendingSps, mPendingPps, mPendingVideoWidth, mPendingVideoHeight, "stabilized-config", false, true);
     }
 
     private void notifyVideoSize(int width, int height, String source) {
