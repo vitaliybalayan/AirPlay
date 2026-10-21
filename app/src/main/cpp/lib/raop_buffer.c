@@ -29,6 +29,7 @@
 #include "fdk-aac/libFDK/include/clz.h"
 #include "fdk-aac/libSYS/include/FDK_audio.h"
 #include "stream.h"
+#include "alac/alac_wrapper.h"
 
 #define RAOP_BUFFER_LENGTH 512
 
@@ -71,6 +72,10 @@ struct raop_buffer_s {
 	/* Buffer of all audio buffers */
 	int buffer_size;
 	void *buffer;
+
+	/* Set from the RTSP SETUP "ct" field: AAC-ELD (mirroring) or ALAC (AirPlay audio) */
+	int codec;
+	alac_wrapper_t *alac;
 };
 
 static int fdk_flags = 0;
@@ -179,10 +184,33 @@ raop_buffer_init(logger_t *logger,
 	return raop_buffer;
 }
 
+int
+raop_buffer_set_codec(raop_buffer_t *raop_buffer, int codec, int frame_length)
+{
+	assert(raop_buffer);
+	if (codec == RAOP_CODEC_ALAC) {
+		if (frame_length <= 0 || frame_length * 4 > raop_buffer->entries[0].audio_buffer_size) {
+			logger_log(raop_buffer->logger, LOGGER_ERR, "ALAC frame length %d not supported", frame_length);
+			return -1;
+		}
+		alac_wrapper_destroy(raop_buffer->alac);
+		raop_buffer->alac = alac_wrapper_create(frame_length, 44100, 2, 16);
+		if (!raop_buffer->alac) {
+			logger_log(raop_buffer->logger, LOGGER_ERR, "ALAC decoder init failed");
+			return -1;
+		}
+	}
+	raop_buffer->codec = codec;
+	logger_log(raop_buffer->logger, LOGGER_INFO, "Audio codec set to %s frame=%d",
+	           codec == RAOP_CODEC_ALAC ? "ALAC" : "AAC-ELD", frame_length);
+	return 0;
+}
+
 void
 raop_buffer_destroy(raop_buffer_t *raop_buffer)
 {
 	if (raop_buffer) {
+	    alac_wrapper_destroy(raop_buffer->alac);
 	    aacDecoder_Close(raop_buffer->phandle);
 		free(raop_buffer->buffer);
 		free(raop_buffer);
@@ -314,6 +342,20 @@ raop_buffer_queue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned shor
         fwrite(packetbuf, payloadsize, 1, file_aac);
     }
 #endif
+    if (raop_buffer->codec == RAOP_CODEC_ALAC) {
+        int decoded = alac_wrapper_decode(raop_buffer->alac, packetbuf, payloadsize,
+                                          entry->audio_buffer, entry->audio_buffer_size);
+        if (decoded < 0) {
+            static int alac_errors = 0;
+            if (++alac_errors == 1 || alac_errors % 500 == 0) {
+                logger_log(raop_buffer->logger, LOGGER_ERR, "ALAC decode error (count=%d)", alac_errors);
+            }
+            decoded = 0;
+        }
+        entry->audio_buffer_len = decoded;
+        goto decoded;
+    }
+
 	// aac解码pcm
     int ret = 0;
     int pkt_size = payloadsize;
@@ -326,7 +368,11 @@ raop_buffer_queue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned shor
 	ret = aacDecoder_DecodeFrame(raop_buffer->phandle, entry->audio_buffer, pcm_pkt_size, fdk_flags);
 	entry->audio_buffer_len = pcm_pkt_size;
 	if (ret != AAC_DEC_OK) {
-		logger_log(raop_buffer->logger, LOGGER_ERR, "aacDecoder_DecodeFrame error : 0x%x", ret);
+		/* Throttled: a format mismatch fails every packet and floods the log */
+		static int decode_errors = 0;
+		if (++decode_errors == 1 || decode_errors % 500 == 0) {
+			logger_log(raop_buffer->logger, LOGGER_ERR, "aacDecoder_DecodeFrame error : 0x%x (count=%d)", ret, decode_errors);
+		}
 	}
 #ifdef DUMP_AUDIO
     if (file_pcm != NULL) {
@@ -334,6 +380,7 @@ raop_buffer_queue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned shor
     }
 #endif
 
+decoded:
 	/* Update the raop_buffer seqnums */
 	if (raop_buffer->is_empty) {
 		raop_buffer->first_seqnum = seqnum;

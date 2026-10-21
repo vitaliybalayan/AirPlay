@@ -18,6 +18,8 @@
 /* This file should be only included from raop.c as it defines static handler
  * functions and depends on raop internals */
 
+static int raop_get_plist_number(plist_t root_node, const char *key, double *out);
+
 typedef void (*raop_handler_t)(raop_conn_t *, http_request_t *,
                                http_response_t *, char **, int *);
 
@@ -104,86 +106,101 @@ raop_handler_server_info(raop_conn_t *conn,
     (void)request;
 
     root_node = plist_new_dict();
+    plist_dict_set_item(root_node, "deviceid", plist_new_string(conn->raop->device_id));
     plist_dict_set_item(root_node, "features", plist_new_uint(GLOBAL_FEATURES));
+    plist_dict_set_item(root_node, "macAddress", plist_new_string(conn->raop->device_id));
     plist_dict_set_item(root_node, "model", plist_new_string(GLOBAL_MODEL));
-    plist_dict_set_item(root_node, "name", plist_new_string("Android TV"));
-    plist_dict_set_item(root_node, "sourceVersion", plist_new_string("220.68"));
+    plist_dict_set_item(root_node, "name", plist_new_string(conn->raop->name));
+    plist_dict_set_item(root_node, "protovers", plist_new_string("1.0"));
+    plist_dict_set_item(root_node, "srcvers", plist_new_string(GLOBAL_SOURCE_VERSION));
+    plist_dict_set_item(root_node, "sourceVersion", plist_new_string(GLOBAL_SOURCE_VERSION));
     plist_dict_set_item(root_node, "statusFlags", plist_new_uint(4));
 
     raop_write_plist_response(response, root_node, response_data, response_datalen);
+    plist_free(root_node);
+}
+
+static plist_t
+raop_new_audio_format(uint64_t type)
+{
+    plist_t node = plist_new_dict();
+    plist_dict_set_item(node, "type", plist_new_uint(type));
+    plist_dict_set_item(node, "audioInputFormats", plist_new_uint(0x1FFFFFC));
+    plist_dict_set_item(node, "audioOutputFormats", plist_new_uint(0x1FFFFFC));
+    return node;
+}
+
+static plist_t
+raop_new_audio_latency(uint64_t type)
+{
+    plist_t node = plist_new_dict();
+    plist_dict_set_item(node, "type", plist_new_uint(type));
+    plist_dict_set_item(node, "audioType", plist_new_string("default"));
+    plist_dict_set_item(node, "inputLatencyMicros", plist_new_bool(0));
+    plist_dict_set_item(node, "outputLatencyMicros", plist_new_bool(0));
+    return node;
 }
 
 static void
 raop_handler_info(raop_conn_t *conn,
-					   http_request_t *request, http_response_t *response,
-					   char **response_data, int *response_datalen)
+                  http_request_t *request, http_response_t *response,
+                  char **response_data, int *response_datalen)
 {
-	const char *data;
-	int datalen;
-	data = http_request_get_data(request, &datalen);
+    unsigned char pk[32];
+    plist_t root_node;
+    plist_t audio_formats;
+    plist_t audio_latencies;
+    plist_t displays;
+    plist_t display;
 
-	char info[] = {0x62,0x70,0x6c,0x69,0x73,0x74,0x30,0x30,0x10,0x0e,0x12,0x01,0xff,0xff,0xfc,0x59
-			,0x61,0x75,0x64,0x69,0x6f,0x54,0x79,0x70,0x65,0xdf,0x10,0x0f,0x01,0x03,0x05,0x07
-			,0x08,0x0a,0x0c,0x0e,0x0f,0x11,0x1b,0x24,0x26,0x28,0x2a,0x02,0x04,0x06,0x06,0x09
-			,0x0b,0x0d,0x0d,0x10,0x12,0x1c,0x25,0x27,0x29,0x2b,0x54,0x74,0x79,0x70,0x65,0x58
-			,0x64,0x69,0x73,0x70,0x6c,0x61,0x79,0x73,0x54,0x75,0x75,0x69,0x64,0x5f,0x10,0x11
-			,0x61,0x75,0x64,0x69,0x6f,0x49,0x6e,0x70,0x75,0x74,0x46,0x6f,0x72,0x6d,0x61,0x74
-			,0x73,0x58,0x66,0x65,0x61,0x74,0x75,0x72,0x65,0x73,0x5b,0x72,0x65,0x66,0x72,0x65
-			,0x73,0x68,0x52,0x61,0x74,0x65,0xd4,0x1e,0x20,0x22,0x16,0x1f,0x21,0x21,0x1a,0x5f
-			,0x10,0x11,0x61,0x61,0x3a,0x35,0x34,0x3a,0x30,0x31,0x3a,0x61,0x66,0x3a,0x63,0x33
-			,0x3a,0x63,0x31,0x10,0x1e,0x10,0x64,0x55,0x6d,0x6f,0x64,0x65,0x6c,0x10,0x3c,0x56
-			,0x68,0x65,0x69,0x67,0x68,0x74,0x5a,0x41,0x70,0x70,0x6c,0x65,0x54,0x56,0x32,0x2c
-			,0x31,0x5d,0x73,0x6f,0x75,0x72,0x63,0x65,0x56,0x65,0x72,0x73,0x69,0x6f,0x6e,0x5f
-			,0x10,0x11,0x6b,0x65,0x65,0x70,0x41,0x6c,0x69,0x76,0x65,0x4c,0x6f,0x77,0x50,0x6f
-			,0x77,0x65,0x72,0xdc,0x2d,0x2f,0x31,0x32,0x33,0x34,0x35,0x36,0x28,0x39,0x3b,0x3c
-			,0x2e,0x30,0x21,0x21,0x21,0x30,0x2e,0x37,0x38,0x3a,0x21,0x3d,0x5d,0x77,0x69,0x64
-			,0x74,0x68,0x50,0x68,0x79,0x73,0x69,0x63,0x61,0x6c,0x56,0x32,0x32,0x30,0x2e,0x36
-			,0x38,0xd3,0x14,0x16,0x18,0x15,0x17,0x15,0x5b,0x6f,0x76,0x65,0x72,0x73,0x63,0x61
-			,0x6e,0x6e,0x65,0x64,0x5b,0x77,0x69,0x64,0x74,0x68,0x50,0x69,0x78,0x65,0x6c,0x73
-			,0x4f,0x10,0x20,0xb0,0x77,0x27,0xd6,0xf6,0xcd,0x6e,0x08,0xb5,0x8e,0xde,0x52,0x5e
-			,0xc3,0xcd,0xea,0xa2,0x52,0xad,0x9f,0x68,0x3f,0xeb,0x21,0x2e,0xf8,0xa2,0x05,0x24
-			,0x65,0x54,0xe7,0x5a,0x6d,0x61,0x63,0x41,0x64,0x64,0x72,0x65,0x73,0x73,0x10,0x02
-			,0xa1,0x2c,0x10,0x04,0xa2,0x13,0x19,0x5c,0x61,0x75,0x64,0x69,0x6f,0x46,0x6f,0x72
-			,0x6d,0x61,0x74,0x73,0x54,0x6e,0x61,0x6d,0x65,0x08,0x52,0x76,0x76,0x13,0x00,0x00
-			,0x00,0x1e,0x5a,0x7f,0xff,0xf7,0x5f,0x10,0x12,0x69,0x6e,0x70,0x75,0x74,0x4c,0x61
-			,0x74,0x65,0x6e,0x63,0x79,0x4d,0x69,0x63,0x72,0x6f,0x73,0x5b,0x73,0x74,0x61,0x74
-			,0x75,0x73,0x46,0x6c,0x61,0x67,0x73,0x57,0x41,0x70,0x70,0x6c,0x65,0x54,0x56,0xd4
-			,0x1e,0x20,0x22,0x16,0x1f,0x21,0x21,0x17,0x57,0x64,0x65,0x66,0x61,0x75,0x6c,0x74
-			,0x5f,0x10,0x24,0x32,0x65,0x33,0x38,0x38,0x30,0x30,0x36,0x2d,0x31,0x33,0x62,0x61
-			,0x2d,0x34,0x30,0x34,0x31,0x2d,0x39,0x61,0x36,0x37,0x2d,0x32,0x35,0x64,0x64,0x34
-			,0x61,0x34,0x33,0x64,0x35,0x33,0x36,0xd3,0x14,0x16,0x18,0x15,0x1a,0x15,0x5f,0x10
-			,0x13,0x6f,0x75,0x74,0x70,0x75,0x74,0x4c,0x61,0x74,0x65,0x6e,0x63,0x79,0x4d,0x69
-			,0x63,0x72,0x6f,0x73,0x5e,0x61,0x75,0x64,0x69,0x6f,0x4c,0x61,0x74,0x65,0x6e,0x63
-			,0x69,0x65,0x73,0x58,0x72,0x6f,0x74,0x61,0x74,0x69,0x6f,0x6e,0x10,0x01,0x5c,0x68
-			,0x65,0x69,0x67,0x68,0x74,0x50,0x69,0x78,0x65,0x6c,0x73,0x56,0x6d,0x61,0x78,0x46
-			,0x50,0x53,0x58,0x64,0x65,0x76,0x69,0x63,0x65,0x49,0x44,0x5f,0x10,0x12,0x61,0x75
-			,0x64,0x69,0x6f,0x4f,0x75,0x74,0x70,0x75,0x74,0x46,0x6f,0x72,0x6d,0x61,0x74,0x73
-			,0x5f,0x10,0x24,0x65,0x30,0x66,0x66,0x38,0x61,0x32,0x37,0x2d,0x36,0x37,0x33,0x38
-			,0x2d,0x33,0x64,0x35,0x36,0x2d,0x38,0x61,0x31,0x36,0x2d,0x63,0x63,0x35,0x33,0x61
-			,0x61,0x63,0x65,0x65,0x39,0x32,0x35,0x5f,0x10,0x18,0x6b,0x65,0x65,0x70,0x41,0x6c
-			,0x69,0x76,0x65,0x53,0x65,0x6e,0x64,0x53,0x74,0x61,0x74,0x73,0x41,0x73,0x42,0x6f
-			,0x64,0x79,0x5e,0x68,0x65,0x69,0x67,0x68,0x74,0x50,0x68,0x79,0x73,0x69,0x63,0x61
-			,0x6c,0x10,0x65,0x55,0x77,0x69,0x64,0x74,0x68,0x52,0x70,0x69,0x52,0x70,0x6b,0xa2
-			,0x1d,0x23,0x11,0x04,0x38,0x11,0x07,0x80,0x00,0x19,0x00,0xb1,0x00,0xfa,0x01,0x8b
-			,0x01,0x52,0x01,0x43,0x00,0x7f,0x02,0x22,0x01,0x64,0x01,0x97,0x01,0x6a,0x01,0x4e
-			,0x00,0xbf,0x02,0x0c,0x02,0x67,0x02,0x99,0x01,0xb0,0x01,0x57,0x01,0x54,0x01,0x01
-			,0x02,0x2b,0x00,0x0a,0x00,0x3a,0x00,0x95,0x00,0x4d,0x01,0xd7,0x02,0x91,0x01,0xf4
-			,0x02,0x9f,0x01,0x9f,0x00,0x0f,0x01,0xa8,0x01,0x76,0x01,0x69,0x01,0xde,0x00,0x76
-			,0x02,0x9c,0x01,0x20,0x00,0x97,0x00,0xa6,0x00,0x61,0x01,0x6d,0x00,0x3f,0x01,0x50
-			,0x00,0xd3,0x00,0x9f,0x02,0xa2,0x02,0x93,0x02,0xa5,0x02,0x03,0x00,0xec,0x02,0x82
-			,0x01,0x14,0x02,0x0e,0x00,0x6a,0x00,0x9d,0x00,0x08,0x02,0x1b,0x00,0x93,0x01,0x08
-			,0x00,0x48,0x02,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x02,0x01,0x00,0x00,0x00,0x00
-			,0x00,0x00,0x00,0x3e,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
-			,0x00,0x00,0x02,0xa8
-	};
-	size_t len = sizeof(info);
-	*response_data = malloc(len);
-	memcpy(*response_data, info, len);
-	if (*response_data) {
-        http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
-        //http_response_add_header(response, "Date", "Sun, 27 Jan 2019 10:32:17 GMT");
-		*response_datalen = len;
-	}
+    (void)request;
+
+    pairing_get_public_key(conn->raop->pairing, pk);
+
+    audio_formats = plist_new_array();
+    plist_array_append_item(audio_formats, raop_new_audio_format(100));
+    plist_array_append_item(audio_formats, raop_new_audio_format(101));
+
+    audio_latencies = plist_new_array();
+    plist_array_append_item(audio_latencies, raop_new_audio_latency(100));
+    plist_array_append_item(audio_latencies, raop_new_audio_latency(101));
+
+    /* The sender encodes the mirror stream for this display: 1080p at 60 fps. */
+    display = plist_new_dict();
+    plist_dict_set_item(display, "uuid", plist_new_string("e0ff8a27-6738-3d56-8a16-cc53aacee925"));
+    plist_dict_set_item(display, "width", plist_new_uint(1920));
+    plist_dict_set_item(display, "height", plist_new_uint(1080));
+    plist_dict_set_item(display, "widthPixels", plist_new_uint(1920));
+    plist_dict_set_item(display, "heightPixels", plist_new_uint(1080));
+    plist_dict_set_item(display, "widthPhysical", plist_new_bool(0));
+    plist_dict_set_item(display, "heightPhysical", plist_new_bool(0));
+    plist_dict_set_item(display, "refreshRate", plist_new_uint(60));
+    plist_dict_set_item(display, "maxFPS", plist_new_uint(60));
+    plist_dict_set_item(display, "features", plist_new_uint(14));
+    plist_dict_set_item(display, "overscanned", plist_new_bool(0));
+    plist_dict_set_item(display, "rotation", plist_new_bool(0));
+    displays = plist_new_array();
+    plist_array_append_item(displays, display);
+
+    root_node = plist_new_dict();
+    plist_dict_set_item(root_node, "audioFormats", audio_formats);
+    plist_dict_set_item(root_node, "audioLatencies", audio_latencies);
+    plist_dict_set_item(root_node, "deviceID", plist_new_string(conn->raop->device_id));
+    plist_dict_set_item(root_node, "displays", displays);
+    plist_dict_set_item(root_node, "features", plist_new_uint((GLOBAL_FEATURES_EXT << 32) | GLOBAL_FEATURES));
+    plist_dict_set_item(root_node, "keepAliveLowPower", plist_new_uint(1));
+    plist_dict_set_item(root_node, "keepAliveSendStatsAsBody", plist_new_uint(1));
+    plist_dict_set_item(root_node, "macAddress", plist_new_string(conn->raop->device_id));
+    plist_dict_set_item(root_node, "model", plist_new_string(GLOBAL_MODEL));
+    plist_dict_set_item(root_node, "name", plist_new_string(conn->raop->name));
+    plist_dict_set_item(root_node, "pi", plist_new_string("2e388006-13ba-4041-9a67-25dd4a43d536"));
+    plist_dict_set_item(root_node, "pk", plist_new_data((const char *) pk, sizeof(pk)));
+    plist_dict_set_item(root_node, "sourceVersion", plist_new_string(GLOBAL_SOURCE_VERSION));
+    plist_dict_set_item(root_node, "statusFlags", plist_new_uint(4));
+    plist_dict_set_item(root_node, "vv", plist_new_uint(2));
+
+    raop_write_plist_response(response, root_node, response_data, response_datalen);
+    plist_free(root_node);
 }
 
 static void
@@ -402,25 +419,44 @@ raop_handler_setup(raop_conn_t *conn,
         uint64_t eiv_len = 0;
         if (!eiv_note) {
             logger_log(conn->raop->logger, LOGGER_ERR, "SETUP 1 missing eiv");
+            plist_free(root_node);
             http_response_set_disconnect(response, 1);
             return;
         }
         plist_get_data_val(eiv_note, &eiv, &eiv_len);
+        if (!eiv || eiv_len < 16) {
+            logger_log(conn->raop->logger, LOGGER_ERR, "SETUP 1 invalid eiv length=%llu", eiv_len);
+            free(eiv);
+            plist_free(root_node);
+            http_response_set_disconnect(response, 1);
+            return;
+        }
         memcpy(aesiv, eiv, 16);
+        free(eiv);
         plist_t ekey_note = plist_dict_get_item(root_node, "ekey");
         char* ekey= NULL;
         uint64_t ekey_len = 0;
         if (!ekey_note) {
             logger_log(conn->raop->logger, LOGGER_ERR, "SETUP 1 missing ekey");
+            plist_free(root_node);
             http_response_set_disconnect(response, 1);
             return;
         }
         plist_get_data_val(ekey_note, &ekey, &ekey_len);
+        if (!ekey || ekey_len < 72) {
+            logger_log(conn->raop->logger, LOGGER_ERR, "SETUP 1 invalid ekey length=%llu", ekey_len);
+            free(ekey);
+            plist_free(root_node);
+            http_response_set_disconnect(response, 1);
+            return;
+        }
         // 时间port
 		uint64_t timing_rport;
         plist_t time_note = plist_dict_get_item(root_node, "timingPort");
         if (!time_note) {
             logger_log(conn->raop->logger, LOGGER_ERR, "SETUP 1 missing timingPort");
+            free(ekey);
+            plist_free(root_node);
             http_response_set_disconnect(response, 1);
             return;
         }
@@ -428,6 +464,7 @@ raop_handler_setup(raop_conn_t *conn,
         logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SETUP step=1 timingPort=%llu", conn->id, timing_rport);
         // ekey是72字节
         int ret = fairplay_decrypt(conn->fairplay, ekey, aeskey);
+        free(ekey);
         if (ret != 0) {
             logger_log(conn->raop->logger, LOGGER_ERR, "[RTSP#%d] fairplay_decrypt failed ret=%d", conn->id, ret);
         }
@@ -442,6 +479,7 @@ raop_handler_setup(raop_conn_t *conn,
         logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SETUP step=2 stream negotiation", conn->id);
         if (!stream_note) {
             logger_log(conn->raop->logger, LOGGER_ERR, "SETUP 2 empty streams");
+            plist_free(root_node);
             http_response_set_disconnect(response, 1);
             return;
         }
@@ -453,6 +491,7 @@ raop_handler_setup(raop_conn_t *conn,
 		uint64_t streamConnectionID;
         if (!stream_id_note) {
             logger_log(conn->raop->logger, LOGGER_ERR, "SETUP 2 missing streamConnectionID");
+            plist_free(root_node);
             http_response_set_disconnect(response, 1);
             return;
         }
@@ -481,21 +520,33 @@ raop_handler_setup(raop_conn_t *conn,
         plist_dict_set_item(r_node, "eventPort", event_port_node);
         plist_dict_set_item(r_node, "timingPort", timing_port_node);
         plist_dict_set_item(r_node, "streams", s_node);
-        uint32_t len = 0;
-        char* rsp = NULL;
-        plist_to_bin(r_node, &rsp, &len);
-        http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
-        *response_data = malloc(len);
-        memcpy(*response_data, rsp, len);
-        *response_datalen = len;
+        raop_write_plist_response(response, r_node, response_data, response_datalen);
+        plist_free(r_node);
         logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SETUP step=2 response dataPort=%u timingPort=%u", conn->id, dport, tport);
     } else if (is_audio_setup) {
         logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SETUP step=3 audio stream", conn->id);
+        {
+            double ct = -1, spf = -1, audio_format = -1, sr = -1;
+            raop_get_plist_number(stream_note, "ct", &ct);
+            raop_get_plist_number(stream_note, "spf", &spf);
+            raop_get_plist_number(stream_note, "audioFormat", &audio_format);
+            raop_get_plist_number(stream_note, "sr", &sr);
+            logger_log(conn->raop->logger, LOGGER_INFO,
+                       "[RTSP#%d] SETUP step=3 audio ct=%.0f audioFormat=0x%llx spf=%.0f sr=%.0f",
+                       conn->id, ct, (unsigned long long) audio_format, spf, sr);
+        }
         conn->setup_step = 3;
         conn_set_role(conn, "audio-control");
         unsigned short cport = 0, tport = 0, dport = 0;
 
         if (conn->raop_rtp) {
+            double ct = 8, spf = 480;
+            raop_get_plist_number(stream_note, "ct", &ct);
+            raop_get_plist_number(stream_note, "spf", &spf);
+            raop_rtp_set_audio_format(conn->raop_rtp, (int) ct, (int) spf);
+            if (conn->raop->callbacks.audio_session) {
+                conn->raop->callbacks.audio_session(conn->raop->callbacks.cls, 1, (int) ct);
+            }
             raop_rtp_start_audio(conn->raop_rtp, use_udp, remote_cport, remote_tport, &cport, &tport, &dport);
             logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Audio started dataPort=%u controlPort=%u timingPort=%u", conn->id, dport, cport, tport);
         } else {
@@ -534,13 +585,8 @@ raop_handler_setup(raop_conn_t *conn,
 		plist_array_append_item(s_node, s_sub_node);
 		plist_dict_set_item(r_node, "timingPort", timing_port_node);
 		plist_dict_set_item(r_node, "streams", s_node);
-		uint32_t len = 0;
-		char* rsp = NULL;
-		plist_to_bin(r_node, &rsp, &len);
-		http_response_add_header(response, "Content-Type", "application/x-apple-binary-plist");
-		*response_data = malloc(len);
-		memcpy(*response_data, rsp, len);
-		*response_datalen = len;
+		raop_write_plist_response(response, r_node, response_data, response_datalen);
+		plist_free(r_node);
 
 		logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SETUP step=3 response dataPort=%u controlPort=%u timingPort=%u", conn->id, dport, cport, tport);
     } else {
@@ -552,7 +598,24 @@ raop_handler_setup(raop_conn_t *conn,
                    has_stream_type ? raop_stream_type_name(stream_type) : "missing");
         http_response_set_disconnect(response, 1);
     }
+    plist_free(root_node);
+}
 
+/* Volume is applied right away from the RTSP thread. Routing it through the
+ * audio RTP thread (as before) lost it whenever no audio stream was running,
+ * e.g. during URL video playback or silent mirroring. */
+static void
+raop_apply_volume(raop_conn_t *conn, float volume_db)
+{
+    if (volume_db > 0.0f) {
+        volume_db = 0.0f;
+    } else if (volume_db < -144.0f) {
+        volume_db = -144.0f;
+    }
+    conn->raop->volume = volume_db;
+    if (conn->raop->callbacks.audio_set_volume) {
+        conn->raop->callbacks.audio_set_volume(conn->raop->callbacks.cls, NULL, volume_db);
+    }
 }
 
 static void
@@ -592,11 +655,7 @@ raop_handler_get_parameter(raop_conn_t *conn,
 			/* This is a bit ugly, but seems to be how airport works too */
 			if (!strncmp(current, "volume\r\n", 8)) {
 				char volume[64];
-				float current_volume = 0.0f;
-
-				if (conn->raop_rtp) {
-					current_volume = raop_rtp_get_volume(conn->raop_rtp);
-				}
+				float current_volume = conn->raop->volume;
 				snprintf(volume, sizeof(volume), "volume: %.6f\r\n", current_volume);
 
 				http_response_add_header(response, "Content-Type", "text/parameters");
@@ -644,24 +703,28 @@ raop_handler_set_parameter(raop_conn_t *conn,
 	if (!strcmp(content_type, "text/parameters")) {
 		char *datastr;
 		datastr = calloc(1, datalen+1);
-		if (data && datastr && conn->raop_rtp) {
+		if (data && datastr && datalen > 8 && !strncmp(data, "volume: ", 8)) {
+			float vol = 0.0f;
 			memcpy(datastr, data, datalen);
-			if (!strncmp(datastr, "volume: ", 8)) {
-				float vol = 0.0;
-				sscanf(datastr+8, "%f", &vol);
+			if (sscanf(datastr + 8, "%f", &vol) == 1) {
 				logger_log(conn->raop->logger, LOGGER_INFO,
 				           "[RTSP#%d] SET_PARAMETER volume=%.2f dB",
 				           conn->id,
 				           vol);
-				raop_rtp_set_volume(conn->raop_rtp, vol);
-			} else if (!strncmp(datastr, "progress: ", 10)) {
+				raop_apply_volume(conn, vol);
+			}
+		} else if (data && datastr && conn->raop_rtp) {
+			memcpy(datastr, data, datalen);
+			if (!strncmp(datastr, "progress: ", 10)) {
 				unsigned int start, curr, end;
 				sscanf(datastr+10, "%u/%u/%u", &start, &curr, &end);
 				logger_log(conn->raop->logger, LOGGER_INFO,
 				           "[RTSP#%d] SET_PARAMETER progress=%u/%u/%u",
 				           conn->id,
 				           start, curr, end);
-				raop_rtp_set_progress(conn->raop_rtp, start, curr, end);
+				if (conn->raop->callbacks.audio_set_progress) {
+					conn->raop->callbacks.audio_set_progress(conn->raop->callbacks.cls, NULL, start, curr, end);
+				}
 			} else {
 				logger_log(conn->raop->logger, LOGGER_INFO,
 				           "[RTSP#%d] SET_PARAMETER text body=%s",
@@ -674,17 +737,13 @@ raop_handler_set_parameter(raop_conn_t *conn,
 		free(datastr);
 	} else if (!strcmp(content_type, "image/jpeg") || !strcmp(content_type, "image/png")) {
 		logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SET_PARAMETER coverart bytes=%d", conn->id, datalen);
-		if (conn->raop_rtp) {
-			raop_rtp_set_coverart(conn->raop_rtp, data, datalen);
-		} else {
-			logger_log(conn->raop->logger, LOGGER_WARNING, "RAOP not initialized at SET_PARAMETER coverart");
+		if (conn->raop->callbacks.audio_set_coverart) {
+			conn->raop->callbacks.audio_set_coverart(conn->raop->callbacks.cls, NULL, data, datalen);
 		}
 	} else if (!strcmp(content_type, "application/x-dmap-tagged")) {
 		logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] SET_PARAMETER metadata bytes=%d", conn->id, datalen);
-		if (conn->raop_rtp) {
-			raop_rtp_set_metadata(conn->raop_rtp, data, datalen);
-		} else {
-			logger_log(conn->raop->logger, LOGGER_WARNING, "RAOP not initialized at SET_PARAMETER metadata");
+		if (conn->raop->callbacks.audio_set_metadata) {
+			conn->raop->callbacks.audio_set_metadata(conn->raop->callbacks.cls, NULL, data, datalen);
 		}
 	}
 }
@@ -794,27 +853,107 @@ raop_get_plist_string_copy(plist_t root_node, const char *key)
     return value;
 }
 
+static int
+raop_get_plist_number(plist_t root_node, const char *key, double *out)
+{
+    plist_t node;
+
+    if (!root_node || !key || !out) {
+        return 0;
+    }
+    node = plist_dict_get_item(root_node, key);
+    if (!node) {
+        return 0;
+    }
+    if (plist_get_node_type(node) == PLIST_REAL) {
+        plist_get_real_val(node, out);
+        return 1;
+    }
+    if (plist_get_node_type(node) == PLIST_UINT) {
+        uint64_t value = 0;
+        plist_get_uint_val(node, &value);
+        *out = (double) value;
+        return 1;
+    }
+    return 0;
+}
+
+static int
+raop_get_text_number(const char *data, int datalen, const char *name, double *out)
+{
+    char *value = raop_find_text_parameter(data, datalen, name);
+    char *end = NULL;
+    double parsed;
+
+    if (!value) {
+        return 0;
+    }
+    parsed = strtod(value, &end);
+    if (end == value) {
+        free(value);
+        return 0;
+    }
+    free(value);
+    *out = parsed;
+    return 1;
+}
+
+/* Reads "name=value" from the query string of a request URL. */
+static int
+raop_get_query_number(const char *url, const char *name, double *out)
+{
+    const char *query;
+    size_t name_len;
+
+    if (!url || !name || !out) {
+        return 0;
+    }
+    query = strchr(url, '?');
+    if (!query) {
+        return 0;
+    }
+    query++;
+    name_len = strlen(name);
+    while (*query) {
+        if (!strncmp(query, name, name_len) && query[name_len] == '=') {
+            char *end = NULL;
+            double parsed = strtod(query + name_len + 1, &end);
+            if (end == query + name_len + 1) {
+                return 0;
+            }
+            *out = parsed;
+            return 1;
+        }
+        query = strchr(query, '&');
+        if (!query) {
+            break;
+        }
+        query++;
+    }
+    return 0;
+}
+
+/* start_seconds / start_fraction may be NULL; they are set to -1 when absent. */
 static char *
-raop_extract_direct_play_url(http_request_t *request)
+raop_extract_direct_play_url(http_request_t *request, double *start_seconds, double *start_fraction)
 {
     const char *content_location;
     const char *content_type;
     const char *data;
     int datalen = 0;
     char *url = NULL;
+    double ignored_seconds;
+    double ignored_fraction;
 
-    content_location = http_request_get_header(request, "Content-Location");
-    if (content_location && content_location[0]) {
-        return strdup(content_location);
-    }
+    if (!start_seconds) start_seconds = &ignored_seconds;
+    if (!start_fraction) start_fraction = &ignored_fraction;
+    *start_seconds = -1.0;
+    *start_fraction = -1.0;
 
     content_type = http_request_get_header(request, "Content-Type");
     data = http_request_get_data(request, &datalen);
-    if (!data || datalen <= 0) {
-        return NULL;
-    }
 
-    if (content_type && !strcmp(content_type, "application/x-apple-binary-plist")) {
+    if (data && datalen > 0 && content_type && !strcmp(content_type, "application/x-apple-binary-plist")) {
         plist_t root_node = NULL;
         plist_from_bin(data, datalen, &root_node);
         if (root_node) {
@@ -823,14 +962,23 @@ raop_extract_direct_play_url(http_request_t *request)
             if (!url) url = raop_get_plist_string_copy(root_node, "URL");
             if (!url) url = raop_get_plist_string_copy(root_node, "url");
             if (!url) url = raop_get_plist_string_copy(root_node, "location");
+            raop_get_plist_number(root_node, "Start-Position-Seconds", start_seconds);
+            raop_get_plist_number(root_node, "Start-Position", start_fraction);
             plist_free(root_node);
         }
-        return url;
+    } else if (data && datalen > 0) {
+        url = raop_find_text_parameter(data, datalen, "Content-Location");
+        if (!url) url = raop_find_text_parameter(data, datalen, "URL");
+        raop_get_text_number(data, datalen, "Start-Position-Seconds", start_seconds);
+        raop_get_text_number(data, datalen, "Start-Position", start_fraction);
     }
 
-    url = raop_find_text_parameter(data, datalen, "Content-Location");
-    if (!url) url = raop_find_text_parameter(data, datalen, "URL");
-    if (!url) url = raop_find_text_parameter(data, datalen, "url");
+    if (!url) {
+        content_location = http_request_get_header(request, "Content-Location");
+        if (content_location && content_location[0]) {
+            url = strdup(content_location);
+        }
+    }
     return url;
 }
 
@@ -849,15 +997,20 @@ raop_handler_direct_play(raop_conn_t *conn,
                          http_request_t *request, http_response_t *response,
                          char **response_data, int *response_datalen)
 {
-    char *url = raop_extract_direct_play_url(request);
+    double start_seconds = -1.0;
+    double start_fraction = -1.0;
+    char *url = raop_extract_direct_play_url(request, &start_seconds, &start_fraction);
 
+    (void)response;
     (void)response_data;
     (void)response_datalen;
 
     if (url && url[0] && raop_is_supported_direct_play_url(url)) {
-        logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Direct play URL: %s", conn->id, url);
+        logger_log(conn->raop->logger, LOGGER_INFO,
+                   "[RTSP#%d] Direct play URL: %s start=%.3fs/%.3f",
+                   conn->id, url, start_seconds, start_fraction);
         if (conn->raop->callbacks.direct_play) {
-            conn->raop->callbacks.direct_play(conn->raop->callbacks.cls, url);
+            conn->raop->callbacks.direct_play(conn->raop->callbacks.cls, url, start_seconds, start_fraction);
         }
     } else if (url && url[0]) {
         logger_log(conn->raop->logger, LOGGER_WARNING,
@@ -866,7 +1019,6 @@ raop_handler_direct_play(raop_conn_t *conn,
     } else {
         logger_log(conn->raop->logger, LOGGER_WARNING, "[RTSP#%d] Direct play requested without URL", conn->id);
     }
-    http_response_add_header(response, "Content-Type", "text/parameters");
     free(url);
 }
 
@@ -886,23 +1038,121 @@ raop_handler_direct_stop(raop_conn_t *conn,
     }
 }
 
+static int
+raop_get_direct_playback_info(raop_conn_t *conn, raop_playback_info_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    if (!conn->raop->callbacks.direct_get_playback_info) {
+        return 0;
+    }
+    return conn->raop->callbacks.direct_get_playback_info(conn->raop->callbacks.cls, info);
+}
+
+static void
+raop_handler_direct_scrub(raop_conn_t *conn,
+                          http_request_t *request, http_response_t *response,
+                          char **response_data, int *response_datalen)
+{
+    const char *method = http_request_get_method(request);
+    const char *url = http_request_get_url(request);
+    double position = 0.0;
+
+    if (method && !strcmp(method, "POST")) {
+        if (raop_get_query_number(url, "position", &position)) {
+            logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Direct scrub to %.3fs", conn->id, position);
+            if (conn->raop->callbacks.direct_scrub) {
+                conn->raop->callbacks.direct_scrub(conn->raop->callbacks.cls, position);
+            }
+        }
+        return;
+    }
+
+    /* GET /scrub reports the current position as text/parameters */
+    raop_playback_info_t info;
+    char body[128];
+    raop_get_direct_playback_info(conn, &info);
+    snprintf(body, sizeof(body), "duration: %.6f\r\nposition: %.6f\r\n", info.duration, info.position);
+    http_response_add_header(response, "Content-Type", "text/parameters");
+    *response_data = strdup(body);
+    if (*response_data) {
+        *response_datalen = (int) strlen(*response_data);
+    }
+}
+
+static void
+raop_handler_direct_rate(raop_conn_t *conn,
+                         http_request_t *request, http_response_t *response,
+                         char **response_data, int *response_datalen)
+{
+    double rate = 1.0;
+
+    (void)response;
+    (void)response_data;
+    (void)response_datalen;
+
+    if (raop_get_query_number(http_request_get_url(request), "value", &rate)) {
+        logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Direct rate=%.3f", conn->id, rate);
+        if (conn->raop->callbacks.direct_rate) {
+            conn->raop->callbacks.direct_rate(conn->raop->callbacks.cls, rate);
+        }
+    }
+}
+
+static void
+raop_handler_direct_volume(raop_conn_t *conn,
+                           http_request_t *request, http_response_t *response,
+                           char **response_data, int *response_datalen)
+{
+    double volume = 1.0;
+
+    (void)response;
+    (void)response_data;
+    (void)response_datalen;
+
+    /* HTTP AirPlay sends a linear 0..1 value; map it onto the RTSP dB scale (-30..0, -144 = mute) */
+    if (raop_get_query_number(http_request_get_url(request), "volume", &volume)) {
+        float volume_db = volume <= 0.0 ? -144.0f : (float) (30.0 * ((volume > 1.0 ? 1.0 : volume) - 1.0));
+        logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Direct volume=%.3f (%.2f dB)", conn->id, volume, volume_db);
+        raop_apply_volume(conn, volume_db);
+    }
+}
+
+static plist_t
+raop_new_time_ranges(double start, double duration)
+{
+    plist_t ranges = plist_new_array();
+    plist_t range = plist_new_dict();
+    plist_dict_set_item(range, "start", plist_new_real(start));
+    plist_dict_set_item(range, "duration", plist_new_real(duration));
+    plist_array_append_item(ranges, range);
+    return ranges;
+}
+
 static void
 raop_handler_playback_info(raop_conn_t *conn,
                            http_request_t *request, http_response_t *response,
                            char **response_data, int *response_datalen)
 {
+    raop_playback_info_t info;
     plist_t root_node = plist_new_dict();
 
-    (void)conn;
     (void)request;
 
-    plist_dict_set_item(root_node, "duration", plist_new_real(0.0));
-    plist_dict_set_item(root_node, "position", plist_new_real(0.0));
-    plist_dict_set_item(root_node, "rate", plist_new_real(1.0));
-    plist_dict_set_item(root_node, "readyToPlay", plist_new_bool(1));
-    plist_dict_set_item(root_node, "playbackBufferEmpty", plist_new_bool(0));
-    plist_dict_set_item(root_node, "playbackBufferFull", plist_new_bool(1));
-    plist_dict_set_item(root_node, "playbackLikelyToKeepUp", plist_new_bool(1));
+    if (raop_get_direct_playback_info(conn, &info) && info.ready) {
+        double loaded = info.buffered > info.position ? info.buffered - info.position : 0.0;
+        plist_dict_set_item(root_node, "duration", plist_new_real(info.duration));
+        plist_dict_set_item(root_node, "position", plist_new_real(info.position));
+        plist_dict_set_item(root_node, "rate", plist_new_real(info.rate));
+        plist_dict_set_item(root_node, "readyToPlay", plist_new_bool(1));
+        plist_dict_set_item(root_node, "playbackBufferEmpty", plist_new_bool(loaded <= 0.0));
+        plist_dict_set_item(root_node, "playbackBufferFull", plist_new_bool(0));
+        plist_dict_set_item(root_node, "playbackLikelyToKeepUp", plist_new_bool(1));
+        plist_dict_set_item(root_node, "loadedTimeRanges", raop_new_time_ranges(info.position, loaded));
+        plist_dict_set_item(root_node, "seekableTimeRanges", raop_new_time_ranges(0.0, info.duration));
+    } else {
+        /* Still loading (or nothing playing): a fake "ready, duration 0" made iOS stop playback */
+        plist_dict_set_item(root_node, "readyToPlay", plist_new_bool(0));
+    }
     raop_write_plist_response(response, root_node, response_data, response_datalen);
     plist_free(root_node);
 }

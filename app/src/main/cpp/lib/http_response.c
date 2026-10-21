@@ -131,8 +131,9 @@ http_response_finish(http_response_t *response, const char *data, int datalen)
 		/* Add data to the end of response */
 		http_response_add_data(response, data, datalen);
 	} else {
-		/* Add extra end of line after headers */
-		http_response_add_data(response, "\r\n", 2);
+		/* HTTP/1.1 clients (AirPlay video on iOS) wait for a body until the
+		 * socket closes unless the empty body is declared explicitly. */
+		http_response_add_data(response, "Content-Length: 0\r\n\r\n", 21);
 	}
 	response->complete = 1;
 }

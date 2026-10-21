@@ -289,7 +289,14 @@ httpd_thread(void *arg)
 			/* Parse HTTP request from data read from connection */
 			http_request_add_data(connection->request, buffer, ret);
 			if (http_request_has_error(connection->request)) {
-				logger_log(httpd->logger, LOGGER_INFO, "Error in parsing: %s", http_request_get_error_name(connection->request));
+				char preview[3 * 24 + 1];
+				int i, n = ret < 24 ? ret : 24;
+				for (i = 0; i < n; i++) {
+					snprintf(preview + i * 3, 4, "%02x ", (unsigned char) buffer[i]);
+				}
+				preview[n * 3] = '\0';
+				logger_log(httpd->logger, LOGGER_INFO, "Error in parsing: %s (bytes=%d head=%s)",
+				           http_request_get_error_name(connection->request), ret, preview);
 				httpd_remove_connection(httpd, connection);
 				continue;
 			}
