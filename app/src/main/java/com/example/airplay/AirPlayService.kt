@@ -152,7 +152,7 @@ class AirPlayService : Service() {
         }
         val notification = builder
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("AirPlay")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(if (java.util.Locale.getDefault().language == "ru") "Готов к трансляции" else "Ready to stream")
             .setOngoing(true)
             .build()

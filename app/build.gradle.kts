@@ -27,8 +27,24 @@ android {
         }
     }
 
+    // Upload key for Google Play lives outside the repo (~/.gradle/gradle.properties).
+    val uploadStoreFile = providers.gradleProperty("SCREENMIRROR_UPLOAD_STORE_FILE").orNull
+    signingConfigs {
+        if (uploadStoreFile != null) {
+            create("upload") {
+                storeFile = file(uploadStoreFile)
+                storePassword = providers.gradleProperty("SCREENMIRROR_UPLOAD_STORE_PASSWORD").get()
+                keyAlias = providers.gradleProperty("SCREENMIRROR_UPLOAD_KEY_ALIAS").get()
+                keyPassword = providers.gradleProperty("SCREENMIRROR_UPLOAD_KEY_PASSWORD").get()
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (uploadStoreFile != null) {
+                signingConfig = signingConfigs.getByName("upload")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
