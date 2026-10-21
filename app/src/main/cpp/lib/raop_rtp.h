@@ -37,6 +37,7 @@ raop_rtp_t *raop_rtp_init(logger_t *logger,
                           const unsigned char *ecdh_secret,
                           unsigned short timing_rport);
 
+void raop_rtp_set_audio_format(raop_rtp_t *raop_rtp, int compression_type, int frame_length);
 void raop_rtp_start_audio(raop_rtp_t *raop_rtp, int use_udp, unsigned short control_rport, unsigned short timing_rport,
                      unsigned short *control_lport, unsigned short *timing_lport, unsigned short *data_lport);
 

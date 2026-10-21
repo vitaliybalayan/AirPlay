@@ -530,6 +530,15 @@ raop_rtp_thread_udp(void *arg)
 
 // 启动rtp服务,三个udp端口
 void
+raop_rtp_set_audio_format(raop_rtp_t *raop_rtp, int compression_type, int frame_length)
+{
+    assert(raop_rtp);
+    raop_buffer_set_codec(raop_rtp->buffer,
+                          compression_type == 2 ? RAOP_CODEC_ALAC : RAOP_CODEC_AAC_ELD,
+                          frame_length);
+}
+
+void
 raop_rtp_start_audio(raop_rtp_t *raop_rtp, int use_udp, unsigned short control_rport, unsigned short timing_rport,
                      unsigned short *control_lport, unsigned short *timing_lport, unsigned short *data_lport)
 {

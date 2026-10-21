@@ -19,7 +19,6 @@
 
 #include "raop.h"
 #include "raop_rtp.h"
-#include "raop_rtp.h"
 #include "pairing.h"
 #include "httpd.h"
 
@@ -43,6 +42,13 @@ struct raop_s {
 	httpd_t *httpd;
 
     unsigned short port;
+
+	/* Advertised identity, must match the mDNS TXT records */
+	char name[64];
+	char device_id[32];
+
+	/* Last volume requested by the sender, in AirPlay dB (-144 mute, -30..0) */
+	float volume;
 };
 
 struct raop_conn_s {
@@ -158,6 +164,7 @@ is_direct_play_url(const char *url)
 	        url_path_matches(url, "/playback-info") ||
 	        url_path_matches(url, "/setProperty") ||
 	        url_path_matches(url, "/getProperty") ||
+	        url_path_matches(url, "/volume") ||
 	        url_path_matches(url, "/action"));
 }
 
@@ -460,6 +467,16 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		handler = &raop_handler_pairsetup;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/pair-verify")) {
 		handler = &raop_handler_pairverify;
+	} else if (!strcmp(method, "POST") && !strcmp(url, "/fp-setup2")) {
+		/* FairPlay for AirPlay video is not implemented. Replying 200 with an
+		 * empty body made iOS retry the whole handshake in a tight loop; 421 is
+		 * what other open-source receivers send so the sender moves on. */
+		code = 421;
+		message = "Misdirected Request";
+		logger_log(conn->raop->logger, LOGGER_INFO,
+		           "[RTSP#%d] /fp-setup2 (video FairPlay) not supported -> 421",
+		           conn->id);
+		handled = 1;
 	} else if (!strcmp(method, "POST") && !strcmp(url, "/fp-setup")) {
 		handler = &raop_handler_fpsetup;
 	} else if (!strcmp(method, "OPTIONS")) {
@@ -477,7 +494,7 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 	} else if (!strcmp(method, "RECORD")) {
         handler = &raop_handler_record;
 	} else if (url_path_matches(url, "/play")) {
-		char *direct_url = raop_extract_direct_play_url(request);
+		char *direct_url = raop_extract_direct_play_url(request, NULL, NULL);
 		if (direct_url && direct_url[0] && !raop_is_supported_direct_play_url(direct_url)) {
 			code = 501;
 			message = "Not Implemented";
@@ -496,9 +513,13 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 	} else if (url_path_matches(url, "/getProperty") ||
 	           url_path_matches(url, "/setProperty")) {
 		handler = &raop_handler_empty_plist;
-	} else if (url_path_matches(url, "/action") ||
-	           url_path_matches(url, "/rate") ||
-	           url_path_matches(url, "/scrub")) {
+	} else if (url_path_matches(url, "/scrub")) {
+		handler = &raop_handler_direct_scrub;
+	} else if (url_path_matches(url, "/rate")) {
+		handler = &raop_handler_direct_rate;
+	} else if (url_path_matches(url, "/volume")) {
+		handler = &raop_handler_direct_volume;
+	} else if (url_path_matches(url, "/action")) {
 		logger_log(conn->raop->logger, LOGGER_INFO,
 		           "[RTSP#%d] Direct AirPlay endpoint %s accepted",
 		           conn->id, url);
@@ -535,6 +556,9 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 		if (stop_audio && conn->raop_rtp) {
 			/* Stop active audio transport but keep session keys/state for reuse on the same RTSP connection */
 			raop_rtp_stop(conn->raop_rtp);
+			if (conn->raop->callbacks.audio_session) {
+				conn->raop->callbacks.audio_session(conn->raop->callbacks.cls, 0, 0);
+			}
 			logger_log(conn->raop->logger, LOGGER_INFO, "[RTSP#%d] Audio RTP stopped", conn->id);
 		}
 		if (stop_mirror && conn->raop_rtp_mirror) {
@@ -559,7 +583,6 @@ conn_request(void *ptr, http_request_t *request, http_response_t **response)
 	if (code == 101) {
 		http_response_add_header(*response, "Upgrade", "PTTH/1.0");
 		http_response_add_header(*response, "Connection", "Upgrade");
-		http_response_add_header(*response, "Content-Length", "0");
 	}
 	if (!strcmp(method, "TEARDOWN")) {
 		http_response_add_header(*response, "Connection", "close");
@@ -611,6 +634,9 @@ conn_destroy(void *ptr)
 	if (conn->raop_rtp) {
 		/* This is done in case TEARDOWN was not called */
 		raop_rtp_destroy(conn->raop_rtp);
+		if (!conn->saw_teardown && conn->raop->callbacks.audio_session) {
+			conn->raop->callbacks.audio_session(conn->raop->callbacks.cls, 0, 0);
+		}
 	}
     if (conn->raop_rtp_mirror) {
         /* This is done in case TEARDOWN was not called */
@@ -678,6 +704,9 @@ raop_init(int max_clients, raop_callbacks_t *callbacks)
 	memcpy(&raop->callbacks, callbacks, sizeof(raop_callbacks_t));
 	raop->pairing = pairing;
 	raop->httpd = httpd;
+	raop->volume = 0.0f;
+	conn_copy_string(raop->name, sizeof(raop->name), "Android TV");
+	conn_copy_string(raop->device_id, sizeof(raop->device_id), "AA:54:01:AF:C3:C1");
 	return raop;
 }
 
@@ -718,6 +747,25 @@ raop_set_port(raop_t *raop, unsigned short port)
 {
     assert(raop);
     raop->port = port;
+}
+
+void
+raop_set_device_info(raop_t *raop, const char *name, const char *device_id)
+{
+	assert(raop);
+	if (name && name[0]) {
+		conn_copy_string(raop->name, sizeof(raop->name), name);
+	}
+	if (device_id && device_id[0]) {
+		conn_copy_string(raop->device_id, sizeof(raop->device_id), device_id);
+	}
+}
+
+void
+raop_set_volume(raop_t *raop, float volume_db)
+{
+	assert(raop);
+	raop->volume = volume_db;
 }
 
 unsigned short

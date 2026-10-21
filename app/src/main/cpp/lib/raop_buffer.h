@@ -33,4 +33,8 @@ void raop_buffer_handle_resends(raop_buffer_t *raop_buffer, raop_resend_cb_t res
 void raop_buffer_flush(raop_buffer_t *raop_buffer, int next_seq);
 void raop_buffer_destroy(raop_buffer_t *raop_buffer);
 
+#define RAOP_CODEC_AAC_ELD 0
+#define RAOP_CODEC_ALAC    2
+int raop_buffer_set_codec(raop_buffer_t *raop_buffer, int codec, int frame_length);
+
 #endif

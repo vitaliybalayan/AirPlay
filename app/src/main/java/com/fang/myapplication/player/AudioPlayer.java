@@ -19,8 +19,10 @@ public class AudioPlayer extends Thread {
     private volatile boolean isStopThread = false;
 
     public AudioPlayer() {
+        // The minimum buffer underruns (clicks) on busy TV SoCs; 4x is still well under 100 ms.
+        int bufferSize = AudioTrack.getMinBufferSize(mSampleRate, mChannel, mAudioFormat) * 4;
         this.mTrack = new AudioTrack(AudioManager.STREAM_MUSIC, mSampleRate, mChannel, mAudioFormat,
-                AudioTrack.getMinBufferSize(mSampleRate, mChannel, mAudioFormat), AudioTrack.MODE_STREAM);
+                bufferSize, AudioTrack.MODE_STREAM);
         this.mTrack.play();
         setAirPlayVolume(0.0f);
     }
@@ -32,9 +34,14 @@ public class AudioPlayer extends Thread {
         }
     }
 
-    public void setAirPlayVolume(float volumeDb) {
+    /** AirPlay volume is -30..0 dB, with -144 meaning mute. */
+    public static float airPlayDbToLinear(float volumeDb) {
         float clamped = Math.max(-144.0f, Math.min(0.0f, volumeDb));
-        float linear = clamped <= -144.0f ? 0.0f : (float) Math.pow(10.0, clamped / 20.0);
+        return clamped <= -144.0f ? 0.0f : (float) Math.pow(10.0, clamped / 20.0);
+    }
+
+    public void setAirPlayVolume(float volumeDb) {
+        float linear = airPlayDbToLinear(volumeDb);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 mTrack.setVolume(linear);

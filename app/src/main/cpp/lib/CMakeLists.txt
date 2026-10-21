@@ -17,12 +17,15 @@ include_directories(crypto curve25519 ed25519 playfair plist/plist
 
 
 aux_source_directory(. play_src)
-set(DIR_SRCS ${play_src})
+aux_source_directory(alac alac_src)
+set(DIR_SRCS ${play_src} ${alac_src})
 
 add_library( play-lib
         SHARED
         ${DIR_SRCS}
         )
+# Apple's ALAC sources only auto-detect x86 endianness; Android ARM is little-endian too.
+target_compile_definitions(play-lib PRIVATE TARGET_RT_LITTLE_ENDIAN=1)
 find_library( log-lib
         log )
 target_link_libraries( play-lib

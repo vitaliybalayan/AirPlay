@@ -1,6 +1,8 @@
 package com.example.airplay
 
 import android.content.Context
+import android.graphics.BitmapFactory
+import android.os.SystemClock
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.util.Log
@@ -9,9 +11,35 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.tv.material3.Button
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -30,8 +58,6 @@ import java.util.Locale
 
 import com.fang.myapplication.RaopServer
 
-private const val VIDEO_DIM_ALPHA = 0.18f
-
 class MainActivity : ComponentActivity() {
     private companion object {
         const val TAG = "AirPlayMain"
@@ -43,6 +69,7 @@ class MainActivity : ComponentActivity() {
     private val videoWidthState = androidx.compose.runtime.mutableStateOf(0)
     private val videoHeightState = androidx.compose.runtime.mutableStateOf(0)
     private val isVideoPlayingState = androidx.compose.runtime.mutableStateOf(false)
+    private val nowPlayingState = androidx.compose.runtime.mutableStateOf<NowPlayingUi?>(null)
 
     private fun addLog(msg: String) {
         Log.i(TAG, msg)
@@ -96,7 +123,9 @@ class MainActivity : ComponentActivity() {
                         deviceName = deviceName,
                         videoWidth = videoWidthState.value,
                         videoHeight = videoHeightState.value,
-                        isVideoPlaying = isVideoPlayingState.value
+                        isVideoPlaying = isVideoPlayingState.value,
+                        nowPlaying = nowPlayingState.value,
+                        audioClockMs = { raopServer?.lastAudioPacketRealtimeMs ?: 0L }
                     ) { surfaceView ->
                         if (raopServer == null) {
                             try {
@@ -118,8 +147,29 @@ class MainActivity : ComponentActivity() {
                                     }
                                 })
 
+                                raopServer?.setNowPlayingListener(RaopServer.NowPlayingListener { np ->
+                                    // Decode off the UI thread; covers can be a few hundred KB.
+                                    val previous = nowPlayingState.value
+                                    val cover = when {
+                                        np.coverArt == null -> null
+                                        previous?.coverSource === np.coverArt -> previous.cover
+                                        else -> BitmapFactory.decodeByteArray(np.coverArt, 0, np.coverArt.size)?.asImageBitmap()
+                                    }
+                                    val ui = if (np.active) NowPlayingUi(
+                                        title = np.title,
+                                        artist = np.artist,
+                                        album = np.album,
+                                        cover = cover,
+                                        coverSource = np.coverArt,
+                                        durationSec = np.durationSec,
+                                        positionSec = np.positionSec,
+                                        positionAtMs = np.positionAtMs
+                                    ) else null
+                                    runOnUiThread { nowPlayingState.value = ui }
+                                })
+
                                 addLog("Starting C++ RAOP server...")
-                                raopServer?.startServer()
+                                raopServer?.startServer(deviceName, macAddress)
                                 val raopPort = raopServer?.port ?: 0
                                 addLog("RAOP C++ port: $raopPort")
 
@@ -171,6 +221,9 @@ class MainActivity : ComponentActivity() {
             for (nif in all) {
                 if (!nif.name.equals("wlan0", ignoreCase = true) && !nif.name.equals("eth0", ignoreCase = true)) continue
                 val macBytes = nif.hardwareAddress ?: continue
+                // Android 6+ hides the real MAC behind 02:00:00:00:00:00; that is not unique per TV.
+                if (macBytes.size != 6 || macBytes.all { it == 0.toByte() } ||
+                    (macBytes[0] == 0x02.toByte() && macBytes.drop(1).all { it == 0.toByte() })) continue
                 val res1 = StringBuilder()
                 for (b in macBytes) {
                     res1.append(String.format("%02X:", b))
@@ -201,6 +254,8 @@ fun AirPlayScreen(
     videoWidth: Int,
     videoHeight: Int,
     isVideoPlaying: Boolean,
+    nowPlaying: NowPlayingUi?,
+    audioClockMs: () -> Long,
     onSurfaceReady: (SurfaceView) -> Unit
 ) {
     val isRussian = Locale.getDefault().language == "ru"
@@ -244,15 +299,23 @@ fun AirPlayScreen(
             }
         )
 
-        if (isVideoPlaying) {
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(Color.Black.copy(alpha = VIDEO_DIM_ALPHA))
+        var showHowTo by remember { mutableStateOf(false) }
+        LaunchedEffect(isVideoPlaying, nowPlaying == null) {
+            // Mirroring started or the audio session ended: the walkthrough has served its purpose.
+            if (isVideoPlaying || nowPlaying == null) showHowTo = false
+        }
+
+        if (!isVideoPlaying && nowPlaying != null) {
+            NowPlayingScreen(
+                nowPlaying = nowPlaying,
+                audioClockMs = audioClockMs,
+                isRussian = isRussian,
+                howToVisible = showHowTo,
+                onShowHowTo = { showHowTo = true }
             )
         }
 
-        if (!isVideoPlaying) {
+        if (!isVideoPlaying && nowPlaying == null) {
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
@@ -294,6 +357,304 @@ fun AirPlayScreen(
                 textAlign = TextAlign.Center
             )
         }
+
+        if (showHowTo) {
+            MirroringHowToOverlay(isRussian = isRussian, onClose = { showHowTo = false })
+        }
+    }
+}
+
+data class NowPlayingUi(
+    val title: String?,
+    val artist: String?,
+    val album: String?,
+    val cover: ImageBitmap?,
+    val coverSource: ByteArray?,
+    val durationSec: Double,
+    val positionSec: Double,
+    val positionAtMs: Long
+)
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun NowPlayingScreen(
+    nowPlaying: NowPlayingUi,
+    audioClockMs: () -> Long,
+    isRussian: Boolean,
+    howToVisible: Boolean,
+    onShowHowTo: () -> Unit
+) {
+    val howToFocus = remember { FocusRequester() }
+    LaunchedEffect(howToVisible) {
+        // The remote needs something focused; give it back to the button when the walkthrough closes.
+        if (!howToVisible) howToFocus.requestFocus()
+    }
+    // Progress is extrapolated between the sender's occasional updates.
+    var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    LaunchedEffect(nowPlaying) {
+        while (true) {
+            now = SystemClock.elapsedRealtime()
+            delay(200)
+        }
+    }
+    // Stop advancing shortly after audio stops arriving (pause), instead of running ahead.
+    val lastAudio = audioClockMs()
+    val playedUntil = if (lastAudio > 0) minOf(now, lastAudio + 500) else now
+    val elapsed = if (nowPlaying.positionAtMs > 0) {
+        ((playedUntil - nowPlaying.positionAtMs) / 1000.0).coerceAtLeast(0.0)
+    } else 0.0
+    val position = (nowPlaying.positionSec + elapsed).coerceAtMost(nowPlaying.durationSec)
+
+    var lyrics by remember { mutableStateOf<Lyrics?>(null) }
+    var lyricsStatus by remember { mutableStateOf(LyricsStatus.NONE) }
+    var retryCount by remember { mutableIntStateOf(0) }
+    // Stays true while the next track's lyrics load, so the layout doesn't jump back and forth.
+    var lyricsLayout by remember { mutableStateOf(false) }
+    LaunchedEffect(nowPlaying.title, nowPlaying.artist, retryCount) {
+        lyrics = null
+        val title = nowPlaying.title
+        val artist = nowPlaying.artist
+        if (!title.isNullOrBlank() && !artist.isNullOrBlank()) {
+            lyricsStatus = LyricsStatus.LOADING
+            // The sender repeats metadata in bursts; wait for it to settle before asking LRCLIB.
+            delay(400)
+            val found = LyricsClient.fetch(artist, title, nowPlaying.durationSec, force = retryCount > 0)
+            lyrics = found
+            lyricsStatus = if (found != null) LyricsStatus.FOUND else LyricsStatus.NOT_FOUND
+            lyricsLayout = found != null
+        } else {
+            lyricsStatus = LyricsStatus.NONE
+            lyricsLayout = false
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize().padding(horizontal = 72.dp, vertical = 64.dp)) {
+        AnimatedContent(
+            targetState = lyricsLayout,
+            transitionSpec = { fadeIn(tween(600)) togetherWith fadeOut(tween(400)) },
+            label = "now-playing-layout",
+            modifier = Modifier.align(Alignment.Center)
+        ) { withLyrics ->
+            if (withLyrics) {
+                // Lyrics take the right side; cover and track info shrink into a column on the left.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.width(260.dp)) {
+                        CoverArt(nowPlaying.cover, size = 200.dp)
+                        Spacer(modifier = Modifier.height(20.dp))
+                        TrackInfo(nowPlaying, isRussian, position, compact = true)
+                    }
+                    Spacer(modifier = Modifier.width(56.dp))
+                    Box(modifier = Modifier.weight(1f).height(380.dp)) {
+                        LyricsPanel(
+                            lyrics = lyrics,
+                            positionSec = position,
+                            durationSec = nowPlaying.durationSec,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        if (lyricsStatus == LyricsStatus.LOADING) {
+                            LyricsSearching(isRussian, modifier = Modifier.align(Alignment.CenterStart))
+                        }
+                    }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CoverArt(nowPlaying.cover, size = 320.dp)
+                    Spacer(modifier = Modifier.width(56.dp))
+                    Column(modifier = Modifier.widthIn(max = 720.dp)) {
+                        TrackInfo(nowPlaying, isRussian, position, compact = false)
+                        Spacer(modifier = Modifier.height(24.dp))
+                        // Fixed-height slot so the layout doesn't shift between states.
+                        Box(modifier = Modifier.height(48.dp), contentAlignment = Alignment.CenterStart) {
+                            when (lyricsStatus) {
+                                LyricsStatus.LOADING -> LyricsSearching(isRussian)
+                                LyricsStatus.NOT_FOUND -> AirPlayButton(onClick = { retryCount++ }) {
+                                    Text(
+                                        text = if (isRussian) "Текст не найден · Повторить поиск" else "No lyrics found · Try again",
+                                        fontSize = 15.sp
+                                    )
+                                }
+                                else -> Unit
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        AirPlayButton(
+            onClick = onShowHowTo,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                // Sits below the screen's content padding, leaving a clear gap above it.
+                .offset(y = 44.dp)
+                .focusRequester(howToFocus)
+        ) {
+            Text(
+                text = if (isRussian) "Как смотреть видео на ТВ" else "How to watch video on the TV",
+                fontSize = 18.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun CoverArt(cover: ImageBitmap?, size: androidx.compose.ui.unit.Dp) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color(0xFF1A2028)),
+        contentAlignment = Alignment.Center
+    ) {
+        Crossfade(targetState = cover, animationSpec = tween(600), label = "cover") { image ->
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                if (image != null) {
+                    Image(
+                        bitmap = image,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(text = "\u266A", color = Color(0xFF46515F), fontSize = (size.value * 0.37f).sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrackInfo(nowPlaying: NowPlayingUi, isRussian: Boolean, position: Double, compact: Boolean) {
+    Text(
+        text = if (isRussian) "СЕЙЧАС ИГРАЕТ ЧЕРЕЗ AIRPLAY" else "PLAYING VIA AIRPLAY",
+        color = Color(0xFF7EE2A8),
+        fontSize = if (compact) 11.sp else 14.sp,
+        fontWeight = FontWeight.Bold
+    )
+    Spacer(modifier = Modifier.height(if (compact) 8.dp else 16.dp))
+    val subtitle = listOfNotNull(nowPlaying.artist, nowPlaying.album)
+        .filter { it.isNotBlank() }
+        .joinToString(" — ")
+    // New track: the old title slides up and out, the new one comes in from below.
+    AnimatedContent(
+        targetState = nowPlaying.title to subtitle,
+        transitionSpec = {
+            (slideInVertically(tween(450)) { it / 3 } + fadeIn(tween(450))) togetherWith
+                (slideOutVertically(tween(300)) { -it / 3 } + fadeOut(tween(300)))
+        },
+        label = "track-info"
+    ) { (title, sub) ->
+        Column {
+            Text(
+                text = title ?: if (isRussian) "Звук с iPhone" else "Audio from iPhone",
+                color = Color.White,
+                fontSize = if (compact) 22.sp else 44.sp,
+                lineHeight = if (compact) 26.sp else 50.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (sub.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(if (compact) 4.dp else 10.dp))
+                Text(
+                    text = sub,
+                    color = Color(0xFFB9C7D6),
+                    fontSize = if (compact) 15.sp else 24.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+    if (nowPlaying.durationSec > 0) {
+        Spacer(modifier = Modifier.height(if (compact) 16.dp else 32.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(if (compact) 4.dp else 6.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(Color(0xFF2A333F))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth((position / nowPlaying.durationSec).toFloat().coerceIn(0f, 1f))
+                    .fillMaxHeight()
+                    .background(Color(0xFFE7EDF5))
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(modifier = Modifier.fillMaxWidth()) {
+            val timeSize = if (compact) 13.sp else 16.sp
+            Text(formatTime(position), color = Color(0xFF8A96A6), fontSize = timeSize)
+            Spacer(modifier = Modifier.weight(1f))
+            Text(formatTime(nowPlaying.durationSec), color = Color(0xFF8A96A6), fontSize = timeSize)
+        }
+    }
+}
+
+@Composable
+private fun LyricsSearching(isRussian: Boolean, modifier: Modifier = Modifier) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        LoadingDots(color = Color(0xFF7AA7FF))
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = if (isRussian) "Ищем текст песни…" else "Looking for lyrics…",
+            color = Color(0xFF8A96A6),
+            fontSize = 16.sp
+        )
+    }
+}
+
+/**
+ * TV button with an unmistakable focus state: white 3dp outline plus a lighter fill.
+ * The stock tv-material3 look was too subtle on this TV.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+internal fun AirPlayButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(24.dp)
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        shape = androidx.tv.material3.ButtonDefaults.shape(shape = shape),
+        colors = androidx.tv.material3.ButtonDefaults.colors(
+            containerColor = Color(0xFF1F2630),
+            contentColor = Color(0xFFB9C7D6),
+            focusedContainerColor = Color(0xFF2E3A4A),
+            focusedContentColor = Color.White,
+            pressedContainerColor = Color(0xFF3A4860),
+            pressedContentColor = Color.White
+        ),
+        border = androidx.tv.material3.ButtonDefaults.border(
+            border = androidx.tv.material3.Border(
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2E3A4A)),
+                shape = shape
+            ),
+            focusedBorder = androidx.tv.material3.Border(
+                border = androidx.compose.foundation.BorderStroke(3.dp, Color.White),
+                shape = shape
+            ),
+            pressedBorder = androidx.tv.material3.Border(
+                border = androidx.compose.foundation.BorderStroke(3.dp, Color(0xFF7AA7FF)),
+                shape = shape
+            )
+        ),
+        content = content
+    )
+}
+
+private fun formatTime(seconds: Double): String {
+    val total = seconds.toLong().coerceAtLeast(0)
+    return if (total >= 3600) {
+        String.format(Locale.US, "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+    } else {
+        String.format(Locale.US, "%d:%02d", total / 60, total % 60)
     }
 }
 
