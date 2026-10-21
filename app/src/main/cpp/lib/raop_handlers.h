@@ -187,7 +187,7 @@ raop_handler_info(raop_conn_t *conn,
     plist_dict_set_item(root_node, "audioLatencies", audio_latencies);
     plist_dict_set_item(root_node, "deviceID", plist_new_string(conn->raop->device_id));
     plist_dict_set_item(root_node, "displays", displays);
-    plist_dict_set_item(root_node, "features", plist_new_uint((GLOBAL_FEATURES_EXT << 32) | GLOBAL_FEATURES));
+    plist_dict_set_item(root_node, "features", plist_new_uint((GLOBAL_FEATURES_EXT << 32) | GLOBAL_INFO_FEATURES));
     plist_dict_set_item(root_node, "keepAliveLowPower", plist_new_uint(1));
     plist_dict_set_item(root_node, "keepAliveSendStatsAsBody", plist_new_uint(1));
     plist_dict_set_item(root_node, "macAddress", plist_new_string(conn->raop->device_id));

@@ -197,7 +197,7 @@ fun LoadingDots(color: Color, modifier: Modifier = Modifier) {
 }
 
 /** Lines switch this much ahead of the reported position; reading lags behind hearing otherwise. */
-const val LYRICS_LEAD_SEC = 0.5
+const val LYRICS_LEAD_SEC = 0.3
 
 private const val LINES_BEFORE = 2
 

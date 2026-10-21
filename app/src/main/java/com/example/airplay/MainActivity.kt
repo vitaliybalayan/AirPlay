@@ -3,7 +3,7 @@ package com.example.airplay
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.os.SystemClock
-import android.net.wifi.WifiManager
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import android.view.SurfaceView
@@ -52,67 +52,52 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import com.example.airplay.ui.theme.AirPlayTheme
-import java.net.Inet4Address
-import java.net.NetworkInterface
 import java.util.Locale
 
 import com.fang.myapplication.RaopServer
 
 class MainActivity : ComponentActivity() {
-    private companion object {
-        const val TAG = "AirPlayMain"
+    companion object {
+        private const val TAG = "AirPlayMain"
+        const val EXTRA_AUTO_LAUNCHED = "auto_launched"
+        // After the sender disconnects, an auto-opened screen closes and returns to what was on the TV.
+        private const val AUTO_CLOSE_DELAY_MS = 2500L
+        private const val AUTO_CLOSE_IDLE_TIMEOUT_MS = 20_000L
+
+        /** Read by the service to decide whether it needs to bring the UI up. */
+        @Volatile
+        var isInForeground = false
+            private set
     }
 
-    private lateinit var airPlayPublisher: AirPlayPublisher
-    private var raopServer: RaopServer? = null
-    private lateinit var multicastLock: WifiManager.MulticastLock
     private val videoWidthState = androidx.compose.runtime.mutableStateOf(0)
     private val videoHeightState = androidx.compose.runtime.mutableStateOf(0)
     private val isVideoPlayingState = androidx.compose.runtime.mutableStateOf(false)
     private val nowPlayingState = androidx.compose.runtime.mutableStateOf<NowPlayingUi?>(null)
-
-    private fun addLog(msg: String) {
-        Log.i(TAG, msg)
-    }
-
-    private fun getWifiIpAddress(): String {
-        try {
-            val interfaces = NetworkInterface.getNetworkInterfaces()
-            for (nif in interfaces) {
-                if (nif.isLoopback || !nif.isUp) continue
-                for (addr in nif.inetAddresses) {
-                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                        return "${addr.hostAddress} (${nif.name})"
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            return "ERROR: ${e.message}"
+    private val overlayGrantedState = androidx.compose.runtime.mutableStateOf(true)
+    private val showSplashState = androidx.compose.runtime.mutableStateOf(false)
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var surfaceView: SurfaceView? = null
+    private var autoLaunched = false
+    private val autoClose = Runnable {
+        if (autoLaunched && !isVideoPlayingState.value && nowPlayingState.value == null) {
+            Log.i(TAG, "Sender gone, closing auto-opened receiver screen")
+            finish()
         }
-        return "NOT FOUND"
     }
+
+    private val server: RaopServer
+        get() = AirPlayRuntime.server(this)
 
     @OptIn(ExperimentalTvMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.i(TAG, "onCreate: starting AirPlay receiver")
+        Log.i(TAG, "onCreate")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        multicastLock = wifi.createMulticastLock("AirPlayReceiverLock")
-        multicastLock.setReferenceCounted(true)
-        multicastLock.acquire()
-        addLog("Multicast lock acquired")
-
-        airPlayPublisher = AirPlayPublisher(this) { msg -> addLog(msg) }
-
-        val deviceName = "Android TV"
-        val macAddress = getMacAddress()
-        val wifiIp = getWifiIpAddress()
-
-        addLog("App started. Device: $deviceName")
-        addLog("MAC: $macAddress")
-        addLog("WiFi IP: $wifiIp")
+        AirPlayService.start(this)
+        handleLaunchIntent(intent)
+        // Intro only on a cold, manual start: when opened for mirroring the video must appear at once.
+        showSplashState.value = savedInstanceState == null && !autoLaunched
 
         setContent {
             AirPlayTheme {
@@ -120,131 +105,150 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize()
                 ) {
                     AirPlayScreen(
-                        deviceName = deviceName,
+                        deviceName = AirPlayRuntime.DEVICE_NAME,
                         videoWidth = videoWidthState.value,
                         videoHeight = videoHeightState.value,
                         isVideoPlaying = isVideoPlayingState.value,
                         nowPlaying = nowPlayingState.value,
-                        audioClockMs = { raopServer?.lastAudioPacketRealtimeMs ?: 0L }
-                    ) { surfaceView ->
-                        if (raopServer == null) {
-                            try {
-                                addLog("Creating RaopServer (C++ engine)...")
-                                raopServer = RaopServer(surfaceView)
-                                Log.i(TAG, "RaopServer created")
-
-                                raopServer?.setLogListener(RaopServer.LogListener { msg ->
-                                    addLog(msg)
-                                })
-                                raopServer?.setVideoSizeListener(object : RaopServer.VideoSizeListener {
-                                    override fun onVideoSizeChanged(width: Int, height: Int) {
-                                        Log.i(TAG, "Video size changed: ${width}x${height}")
-                                        runOnUiThread {
-                                            videoWidthState.value = width
-                                            videoHeightState.value = height
-                                            isVideoPlayingState.value = width > 0 && height > 0
-                                        }
-                                    }
-                                })
-
-                                raopServer?.setNowPlayingListener(RaopServer.NowPlayingListener { np ->
-                                    // Decode off the UI thread; covers can be a few hundred KB.
-                                    val previous = nowPlayingState.value
-                                    val cover = when {
-                                        np.coverArt == null -> null
-                                        previous?.coverSource === np.coverArt -> previous.cover
-                                        else -> BitmapFactory.decodeByteArray(np.coverArt, 0, np.coverArt.size)?.asImageBitmap()
-                                    }
-                                    val ui = if (np.active) NowPlayingUi(
-                                        title = np.title,
-                                        artist = np.artist,
-                                        album = np.album,
-                                        cover = cover,
-                                        coverSource = np.coverArt,
-                                        durationSec = np.durationSec,
-                                        positionSec = np.positionSec,
-                                        positionAtMs = np.positionAtMs
-                                    ) else null
-                                    runOnUiThread { nowPlayingState.value = ui }
-                                })
-
-                                addLog("Starting C++ RAOP server...")
-                                raopServer?.startServer(deviceName, macAddress)
-                                val raopPort = raopServer?.port ?: 0
-                                addLog("RAOP C++ port: $raopPort")
-
-                                val pk = raopServer?.publicKeyHex ?: ""
-                                addLog("PK: ${pk.take(16)}...")
-
-                                if (raopPort > 0) {
-                                    addLog("Publishing mDNS (NsdManager)...")
-                                    airPlayPublisher.startPublishing(deviceName, macAddress, raopPort, raopPort, pk)
-                                    addLog("=== READY! Waiting for iPhone ===")
-                                    addLog("Try: from iPhone Settings > Wi-Fi check same network as $wifiIp")
-                                } else {
-                                    Log.e(TAG, "RAOP server returned port 0")
-                                    addLog("ERROR: raopPort=0!")
-                                }
-                            } catch (e: UnsatisfiedLinkError) {
-                                Log.e(TAG, "Native library error", e)
-                                addLog("NATIVE LIB ERROR: ${e.message}")
-                                e.printStackTrace()
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Startup crash", e)
-                                addLog("CRASH: ${e.javaClass.simpleName}: ${e.message}")
-                                e.printStackTrace()
-                            }
-                        }
+                        audioClockMs = { AirPlayRuntime.currentServer()?.lastAudioPacketRealtimeMs ?: 0L },
+                        playbackPositionSec = { audiblePositionSec() },
+                        autostartEnabled = overlayGrantedState.value,
+                        onEnableAutostart = { openOverlaySettings() },
+                        showSplash = showSplashState.value,
+                        onSplashFinished = { showSplashState.value = false }
+                    ) { view ->
+                        surfaceView = view
+                        server.attachSurfaceView(view)
                     }
                 }
             }
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleLaunchIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val server = server
+        server.setVideoSizeListener(object : RaopServer.VideoSizeListener {
+            override fun onVideoSizeChanged(width: Int, height: Int) {
+                runOnUiThread { applyVideoSize(width, height) }
+            }
+        })
+        server.setNowPlayingListener(RaopServer.NowPlayingListener { np ->
+            val ui = toUi(np, nowPlayingState.value)
+            runOnUiThread { applyNowPlaying(ui) }
+        })
+        // Catch up on whatever started while this screen was not around.
+        applyVideoSize(server.videoWidth, server.videoHeight)
+        applyNowPlaying(toUi(server.nowPlaying, nowPlayingState.value))
+        surfaceView?.let { server.attachSurfaceView(it) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isInForeground = true
+        overlayGrantedState.value = AirPlayRuntime.canShowOverOtherApps(this)
+    }
+
+    override fun onPause() {
+        isInForeground = false
+        super.onPause()
+    }
+
+    override fun onStop() {
+        AirPlayRuntime.currentServer()?.let { server ->
+            server.setVideoSizeListener(null)
+            server.setNowPlayingListener(null)
+            surfaceView?.let { server.detachSurfaceView(it) }
+        }
+        mainHandler.removeCallbacks(autoClose)
+        super.onStop()
+    }
+
     override fun onDestroy() {
+        // The receiver keeps running in AirPlayService; only this screen goes away.
+        Log.i(TAG, "onDestroy")
         super.onDestroy()
-        Log.i(TAG, "onDestroy: stopping AirPlay receiver")
-        airPlayPublisher.stopPublishing()
-        raopServer?.stopServer()
-        isVideoPlayingState.value = false
-        videoWidthState.value = 0
-        videoHeightState.value = 0
-        if (multicastLock.isHeld) {
-            multicastLock.release()
-            Log.i(TAG, "Multicast lock released")
+    }
+
+    private fun handleLaunchIntent(intent: Intent?) {
+        autoLaunched = intent?.getBooleanExtra(EXTRA_AUTO_LAUNCHED, false) == true
+        if (autoLaunched) {
+            // Nothing arrived after all (sender gave up): don't leave the screen hanging.
+            mainHandler.removeCallbacks(autoClose)
+            mainHandler.postDelayed(autoClose, AUTO_CLOSE_IDLE_TIMEOUT_MS)
         }
     }
 
-    private fun getMacAddress(): String {
-        try {
-            val all = NetworkInterface.getNetworkInterfaces()
-            for (nif in all) {
-                if (!nif.name.equals("wlan0", ignoreCase = true) && !nif.name.equals("eth0", ignoreCase = true)) continue
-                val macBytes = nif.hardwareAddress ?: continue
-                // Android 6+ hides the real MAC behind 02:00:00:00:00:00; that is not unique per TV.
-                if (macBytes.size != 6 || macBytes.all { it == 0.toByte() } ||
-                    (macBytes[0] == 0x02.toByte() && macBytes.drop(1).all { it == 0.toByte() })) continue
-                val res1 = StringBuilder()
-                for (b in macBytes) {
-                    res1.append(String.format("%02X:", b))
-                }
-                if (res1.isNotEmpty()) {
-                    res1.deleteCharAt(res1.length - 1)
-                }
-                return res1.toString()
-            }
-        } catch (ex: Exception) {
-            ex.printStackTrace()
+    private fun applyVideoSize(width: Int, height: Int) {
+        videoWidthState.value = width
+        videoHeightState.value = height
+        isVideoPlayingState.value = width > 0 && height > 0
+        scheduleAutoCloseCheck()
+    }
+
+    private fun applyNowPlaying(ui: NowPlayingUi?) {
+        nowPlayingState.value = ui
+        scheduleAutoCloseCheck()
+    }
+
+    private fun scheduleAutoCloseCheck() {
+        if (!autoLaunched) return
+        mainHandler.removeCallbacks(autoClose)
+        if (!isVideoPlayingState.value && nowPlayingState.value == null) {
+            mainHandler.postDelayed(autoClose, AUTO_CLOSE_DELAY_MS)
         }
+    }
 
-        val androidId = android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID)
-        val hash = androidId?.hashCode() ?: 123456
-        val b1 = (hash shr 24 and 0xFF) and 0xFE
-        val b2 = (hash shr 16 and 0xFF)
-        val b3 = (hash shr 8 and 0xFF)
-        val b4 = (hash and 0xFF)
+    private fun toUi(np: RaopServer.NowPlaying, previous: NowPlayingUi?): NowPlayingUi? {
+        if (!np.active) return null
+        // Covers can be a few hundred KB; decode each image only once.
+        val cover = when {
+            np.coverArt == null -> null
+            previous?.coverSource === np.coverArt -> previous.cover
+            else -> BitmapFactory.decodeByteArray(np.coverArt, 0, np.coverArt.size)?.asImageBitmap()
+        }
+        return NowPlayingUi(
+            title = np.title,
+            artist = np.artist,
+            album = np.album,
+            cover = cover,
+            coverSource = np.coverArt,
+            durationSec = np.durationSec,
+            positionSec = np.positionSec,
+            positionAtMs = np.positionAtMs
+        )
+    }
 
-        return String.format("%02X:%02X:%02X:%02X:55:66", b1, b2, b3, b4)
+    /** Seconds into the track of what is audible now, from the RTP clock; null if unknown. */
+    private fun audiblePositionSec(): Double? {
+        val server = AirPlayRuntime.currentServer() ?: return null
+        val start = server.trackStartRtp
+        val playing = server.playingRtpTimestamp
+        if (start < 0 || playing < 0) return null
+        return ((playing - start) and 0xFFFFFFFFL) / 44100.0
+    }
+
+    /** Opens the system "display over other apps" toggle for this app, falling back to app settings. */
+    private fun openOverlaySettings() {
+        val pkg = android.net.Uri.parse("package:$packageName")
+        val intents = listOf(
+            Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkg),
+            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg),
+            Intent(android.provider.Settings.ACTION_SETTINGS)
+        )
+        for (candidate in intents) {
+            try {
+                startActivity(candidate)
+                return
+            } catch (e: android.content.ActivityNotFoundException) {
+                Log.w(TAG, "No settings screen for ${candidate.action}")
+            }
+        }
     }
 }
 
@@ -256,28 +260,14 @@ fun AirPlayScreen(
     isVideoPlaying: Boolean,
     nowPlaying: NowPlayingUi?,
     audioClockMs: () -> Long,
+    playbackPositionSec: () -> Double?,
+    autostartEnabled: Boolean,
+    onEnableAutostart: () -> Unit,
+    showSplash: Boolean,
+    onSplashFinished: () -> Unit,
     onSurfaceReady: (SurfaceView) -> Unit
 ) {
     val isRussian = Locale.getDefault().language == "ru"
-    val copy = if (isRussian) {
-        IdleCopy(
-            title = "AirPlay",
-            subtitle = "Готов к трансляции",
-            status = "Ожидание устройства",
-            stepOne = "Откройте Пункт управления на iPhone, iPad или Mac.",
-            stepTwo = "Нажмите «Повтор экрана» или AirPlay.",
-            stepThree = "Выберите «$deviceName»."
-        )
-    } else {
-        IdleCopy(
-            title = "AirPlay",
-            subtitle = "Ready to stream",
-            status = "Waiting for device",
-            stepOne = "Open Control Center on your iPhone, iPad, or Mac.",
-            stepTwo = "Tap Screen Mirroring or AirPlay.",
-            stepThree = "Choose \"$deviceName\"."
-        )
-    }
 
     Box(
         modifier = Modifier
@@ -309,6 +299,7 @@ fun AirPlayScreen(
             NowPlayingScreen(
                 nowPlaying = nowPlaying,
                 audioClockMs = audioClockMs,
+                playbackPositionSec = playbackPositionSec,
                 isRussian = isRussian,
                 howToVisible = showHowTo,
                 onShowHowTo = { showHowTo = true }
@@ -316,50 +307,25 @@ fun AirPlayScreen(
         }
 
         if (!isVideoPlaying && nowPlaying == null) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .fillMaxWidth()
-                    .padding(horizontal = 64.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = copy.title,
-                    color = Color.White,
-                    fontSize = 64.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = copy.subtitle,
-                    color = Color(0xFFB9C7D6),
-                    fontSize = 24.sp,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.height(28.dp))
-                StatusLine(text = copy.status)
-                Spacer(modifier = Modifier.height(44.dp))
-                InstructionLine(number = "1", text = copy.stepOne)
-                Spacer(modifier = Modifier.height(14.dp))
-                InstructionLine(number = "2", text = copy.stepTwo)
-                Spacer(modifier = Modifier.height(14.dp))
-                InstructionLine(number = "3", text = copy.stepThree)
-            }
-
-            Text(
-                text = "© vitaliybalayan",
-                color = Color(0xFF46515F),
-                fontSize = 14.sp,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 28.dp),
-                textAlign = TextAlign.Center
+            IdleHomeScreen(
+                deviceName = deviceName,
+                isRussian = isRussian,
+                autostartEnabled = autostartEnabled,
+                onEnableAutostart = onEnableAutostart,
+                animateIn = true
             )
         }
 
         if (showHowTo) {
             MirroringHowToOverlay(isRussian = isRussian, onClose = { showHowTo = false })
+        }
+
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showSplash && !isVideoPlaying,
+            enter = fadeIn(tween(0)),
+            exit = fadeOut(tween(600))
+        ) {
+            SplashIntro(isRussian = isRussian, onFinished = onSplashFinished)
         }
     }
 }
@@ -380,6 +346,7 @@ data class NowPlayingUi(
 private fun NowPlayingScreen(
     nowPlaying: NowPlayingUi,
     audioClockMs: () -> Long,
+    playbackPositionSec: () -> Double?,
     isRussian: Boolean,
     howToVisible: Boolean,
     onShowHowTo: () -> Unit
@@ -403,8 +370,16 @@ private fun NowPlayingScreen(
     val elapsed = if (nowPlaying.positionAtMs > 0) {
         ((playedUntil - nowPlaying.positionAtMs) / 1000.0).coerceAtLeast(0.0)
     } else 0.0
-    val position = (nowPlaying.positionSec + elapsed).coerceAtMost(nowPlaying.durationSec)
+    val estimated = (nowPlaying.positionSec + elapsed).coerceAtMost(nowPlaying.durationSec)
+    // Prefer the position of the audio actually playing; the sender's progress runs ahead of it
+    // by a buffering delay that varies per session.
+    val audible = playbackPositionSec()?.takeIf { now >= 0 && it <= nowPlaying.durationSec + 2 }
+    val position = audible?.coerceAtMost(nowPlaying.durationSec) ?: estimated
 
+    val prefs = androidx.compose.ui.platform.LocalContext.current
+        .getSharedPreferences("now_playing", android.content.Context.MODE_PRIVATE)
+    // Remembered across tracks and launches: someone who hid lyrics keeps them hidden.
+    var lyricsHidden by remember { mutableStateOf(prefs.getBoolean("lyrics_hidden", false)) }
     var lyrics by remember { mutableStateOf<Lyrics?>(null) }
     var lyricsStatus by remember { mutableStateOf(LyricsStatus.NONE) }
     var retryCount by remember { mutableIntStateOf(0) }
@@ -430,7 +405,7 @@ private fun NowPlayingScreen(
 
     Box(modifier = Modifier.fillMaxSize().padding(horizontal = 72.dp, vertical = 64.dp)) {
         AnimatedContent(
-            targetState = lyricsLayout,
+            targetState = lyricsLayout && !lyricsHidden,
             transitionSpec = { fadeIn(tween(600)) togetherWith fadeOut(tween(400)) },
             label = "now-playing-layout",
             modifier = Modifier.align(Alignment.Center)
@@ -445,6 +420,20 @@ private fun NowPlayingScreen(
                         CoverArt(nowPlaying.cover, size = 200.dp)
                         Spacer(modifier = Modifier.height(20.dp))
                         TrackInfo(nowPlaying, isRussian, position, compact = true)
+                        if (lyricsStatus == LyricsStatus.FOUND) {
+                            // Kept apart from the lyrics so it never reads as one of the lines.
+                            Spacer(modifier = Modifier.height(18.dp))
+                            Text(
+                                text = if (isRussian) {
+                                    "Текст: LRCLIB. Может отличаться от исполнения или содержать ошибки"
+                                } else {
+                                    "Lyrics: LRCLIB. May differ from the recording or contain mistakes"
+                                },
+                                color = Color(0xFF5F6B7A),
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.width(56.dp))
                     Box(modifier = Modifier.weight(1f).height(380.dp)) {
@@ -483,18 +472,38 @@ private fun NowPlayingScreen(
                 }
             }
         }
-        AirPlayButton(
-            onClick = onShowHowTo,
+        Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 // Sits below the screen's content padding, leaving a clear gap above it.
-                .offset(y = 44.dp)
-                .focusRequester(howToFocus)
+                .offset(y = 44.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text(
-                text = if (isRussian) "Как смотреть видео на ТВ" else "How to watch video on the TV",
-                fontSize = 18.sp
-            )
+            AirPlayButton(
+                onClick = onShowHowTo,
+                modifier = Modifier.focusRequester(howToFocus)
+            ) {
+                Text(
+                    text = if (isRussian) "Как смотреть видео на ТВ" else "How to watch video on the TV",
+                    fontSize = 18.sp
+                )
+            }
+            if (lyricsStatus == LyricsStatus.FOUND) {
+                AirPlayButton(onClick = {
+                    lyricsHidden = !lyricsHidden
+                    prefs.edit().putBoolean("lyrics_hidden", lyricsHidden).apply()
+                }) {
+                    Text(
+                        text = when {
+                            lyricsHidden && isRussian -> "Показать текст"
+                            lyricsHidden -> "Show lyrics"
+                            isRussian -> "Скрыть текст"
+                            else -> "Hide lyrics"
+                        },
+                        fontSize = 18.sp
+                    )
+                }
+            }
         }
     }
 }
@@ -538,14 +547,16 @@ private fun TrackInfo(nowPlaying: NowPlayingUi, isRussian: Boolean, position: Do
         .filter { it.isNotBlank() }
         .joinToString(" — ")
     // New track: the old title slides up and out, the new one comes in from below.
+    // Keyed on title+artist only: the album arrives a moment later and must not replay the animation.
     AnimatedContent(
-        targetState = nowPlaying.title to subtitle,
+        targetState = nowPlaying.title to nowPlaying.artist,
         transitionSpec = {
             (slideInVertically(tween(450)) { it / 3 } + fadeIn(tween(450))) togetherWith
                 (slideOutVertically(tween(300)) { -it / 3 } + fadeOut(tween(300)))
         },
         label = "track-info"
-    ) { (title, sub) ->
+    ) { (title, _) ->
+        val sub = subtitle
         Column {
             Text(
                 text = title ?: if (isRussian) "Звук с iPhone" else "Audio from iPhone",
@@ -593,6 +604,7 @@ private fun TrackInfo(nowPlaying: NowPlayingUi, isRussian: Boolean, position: Do
         }
     }
 }
+
 
 @Composable
 private fun LyricsSearching(isRussian: Boolean, modifier: Modifier = Modifier) {
@@ -658,58 +670,7 @@ private fun formatTime(seconds: Double): String {
     }
 }
 
-private data class IdleCopy(
-    val title: String,
-    val subtitle: String,
-    val status: String,
-    val stepOne: String,
-    val stepTwo: String,
-    val stepThree: String
-)
 
-@Composable
-private fun StatusLine(text: String) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .size(9.dp)
-                .background(Color(0xFF37D67A))
-        )
-        Spacer(modifier = Modifier.width(10.dp))
-        Text(
-            text = text.uppercase(Locale.getDefault()),
-            color = Color(0xFF7EE2A8),
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold
-        )
-    }
-}
-
-@Composable
-private fun InstructionLine(number: String, text: String) {
-    Row(
-        modifier = Modifier.widthIn(max = 760.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        Text(
-            text = number,
-            color = Color(0xFF7AA7FF),
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.width(34.dp),
-            textAlign = TextAlign.Center
-        )
-        Text(
-            text = text,
-            color = Color(0xFFE7EDF5),
-            fontSize = 21.sp,
-            lineHeight = 29.sp
-        )
-    }
-}
 
 class AspectRatioSurfaceView(context: Context) : SurfaceView(context) {
     private var videoWidth: Int = 0

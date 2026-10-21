@@ -7,6 +7,8 @@ import android.os.Build;
 
 import com.fang.myapplication.model.PCMPacket;
 
+import java.util.ArrayDeque;
+import java.util.Iterator;
 import java.util.concurrent.LinkedBlockingQueue;
 
 public class AudioPlayer extends Thread {
@@ -17,6 +19,12 @@ public class AudioPlayer extends Thread {
     private final int mAudioFormat = AudioFormat.ENCODING_PCM_16BIT;
     private final LinkedBlockingQueue<PCMPacket> mQueue = new LinkedBlockingQueue<>(512);
     private volatile boolean isStopThread = false;
+
+    // (frames written before this packet, packet RTP timestamp): maps the playback head
+    // back to the sender's RTP clock, i.e. what is audible right now.
+    private static final int MAX_MARKS = 4096;
+    private final ArrayDeque<long[]> mMarks = new ArrayDeque<>();
+    private long mFramesWritten = 0;
 
     public AudioPlayer() {
         // The minimum buffer underruns (clicks) on busy TV SoCs; 4x is still well under 100 ms.
@@ -69,11 +77,40 @@ public class AudioPlayer extends Thread {
 
     private void doPlay(PCMPacket pcmPacket) {
         if (pcmPacket != null && pcmPacket.data != null) {
+            synchronized (mMarks) {
+                mMarks.addLast(new long[]{mFramesWritten, pcmPacket.pts & 0xFFFFFFFFL});
+                if (mMarks.size() > MAX_MARKS) {
+                    mMarks.removeFirst();
+                }
+            }
             try {
-                mTrack.write(pcmPacket.data, 0, pcmPacket.data.length);
+                int written = mTrack.write(pcmPacket.data, 0, pcmPacket.data.length);
+                if (written > 0) {
+                    mFramesWritten += written / 2;
+                }
             } catch (IllegalStateException ignored) {
             }
         }
+    }
+
+    /** RTP timestamp of the sample being played right now, or -1 if unknown. */
+    public long getPlayingRtpTimestamp() {
+        long head;
+        try {
+            head = mTrack.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+        } catch (IllegalStateException e) {
+            return -1;
+        }
+        synchronized (mMarks) {
+            Iterator<long[]> it = mMarks.descendingIterator();
+            while (it.hasNext()) {
+                long[] mark = it.next();
+                if (mark[0] <= head) {
+                    return (mark[1] + (head - mark[0])) & 0xFFFFFFFFL;
+                }
+            }
+        }
+        return -1;
     }
 
 
