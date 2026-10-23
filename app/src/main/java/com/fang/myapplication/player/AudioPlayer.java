@@ -4,6 +4,7 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.os.Build;
+import android.util.Log;
 
 import com.fang.myapplication.model.PCMPacket;
 
@@ -13,7 +14,9 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 public class AudioPlayer extends Thread {
 
-    private final AudioTrack mTrack;
+    private static final String TAG = "AudioPlayer";
+
+    private volatile AudioTrack mTrack;
     private final int mChannel = AudioFormat.CHANNEL_OUT_STEREO;
     private final int mSampleRate = 44100;
     private final int mAudioFormat = AudioFormat.ENCODING_PCM_16BIT;
@@ -28,11 +31,51 @@ public class AudioPlayer extends Thread {
 
     public AudioPlayer() {
         // The minimum buffer underruns (clicks) on busy TV SoCs; 4x is still well under 100 ms.
-        int bufferSize = AudioTrack.getMinBufferSize(mSampleRate, mChannel, mAudioFormat) * 4;
-        this.mTrack = new AudioTrack(AudioManager.STREAM_MUSIC, mSampleRate, mChannel, mAudioFormat,
-                bufferSize, AudioTrack.MODE_STREAM);
-        this.mTrack.play();
+        this.mTrack = createTrack();
         setAirPlayVolume(0.0f);
+    }
+
+    private AudioTrack createTrack() {
+        int bufferSize = AudioTrack.getMinBufferSize(mSampleRate, mChannel, mAudioFormat) * 4;
+        AudioTrack track = new AudioTrack(AudioManager.STREAM_MUSIC, mSampleRate, mChannel, mAudioFormat,
+                bufferSize, AudioTrack.MODE_STREAM);
+        track.play();
+        return track;
+    }
+
+    /**
+     * Called when a sender starts a new audio stream. The track lives for the whole process,
+     * and the TV can leave it paused (e.g. after another app played audio); a paused track
+     * fills up and blocks write(), so every later stream would be silent.
+     */
+    public void startSession() {
+        mQueue.clear();
+        synchronized (mMarks) {
+            mMarks.clear();
+        }
+        AudioTrack track = mTrack;
+        try {
+            track.pause();
+            track.flush();
+            track.play();
+            mFramesWritten = 0;
+        } catch (IllegalStateException e) {
+            Log.w(TAG, "startSession: track unusable, recreating", e);
+            recreateTrack();
+        }
+    }
+
+    private synchronized void recreateTrack() {
+        AudioTrack old = mTrack;
+        mTrack = createTrack();
+        mFramesWritten = 0;
+        synchronized (mMarks) {
+            mMarks.clear();
+        }
+        try {
+            old.release();
+        } catch (Exception ignored) {
+        }
     }
 
     public void addPacker(PCMPacket pcmPacket) {
@@ -84,11 +127,21 @@ public class AudioPlayer extends Thread {
                 }
             }
             try {
-                int written = mTrack.write(pcmPacket.data, 0, pcmPacket.data.length);
+                AudioTrack track = mTrack;
+                if (track.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                    Log.w(TAG, "track was not playing (state=" + track.getPlayState() + "), resuming");
+                    track.play();
+                }
+                int written = track.write(pcmPacket.data, 0, pcmPacket.data.length);
                 if (written > 0) {
                     mFramesWritten += written / 2;
+                } else if (written < 0) {
+                    Log.w(TAG, "write failed: " + written + ", recreating track");
+                    recreateTrack();
                 }
-            } catch (IllegalStateException ignored) {
+            } catch (IllegalStateException e) {
+                Log.w(TAG, "write on a broken track, recreating", e);
+                recreateTrack();
             }
         }
     }

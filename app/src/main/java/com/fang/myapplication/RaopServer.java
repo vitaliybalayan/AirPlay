@@ -335,6 +335,10 @@ public class RaopServer implements SurfaceHolder.Callback {
         // Mirroring also opens an AAC-ELD audio stream; only plain AirPlay audio (ALAC) gets the screen.
         boolean show = active && compressionType == COMPRESSION_ALAC;
         Log.i(TAG, "onAudioSession: active=" + active + " ct=" + compressionType);
+        if (active) {
+            mLoggedFirstAudioPacket = false;
+            mAudioPlayer.startSession();
+        }
         if (show) {
             publishNowPlaying(new NowPlaying(true, null, null, null, null, 0, 0, 0));
             requestScreen("airplay-audio");
